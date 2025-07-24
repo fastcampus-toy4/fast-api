@@ -1,5 +1,6 @@
 import pandas as pd
 import os
+import re
 import time
 import pymysql
 import shutil
@@ -60,6 +61,37 @@ except Exception as e:
     print(f"ChromaDB HttpClient 초기화 오류: {e}")
     chroma_client = None
     
+# ---------- API 모델 ----------
+class AskRequest(BaseModel):
+    question: str
+
+class DebugRequest(BaseModel):
+    query: str
+    doc_type: str  # 'vectordb' or 'nutrition'
+
+# 피해야 할 음식 모델
+class AvoidFood(BaseModel):
+    name: str
+    examples: List[str]
+
+# 추천 음식 모델  
+class RecommendedFood(BaseModel):
+    name: str
+    calories_kcal: float
+    sodium_mg: int
+    reason: str
+
+# 응답 모델 수정
+class DietRecommendationResponse(BaseModel):
+    diseases: List[str]
+    avoid_foods: List[AvoidFood]
+    nutrition_standards: str
+    recommended_foods: List[RecommendedFood]
+    greeting: str
+    status: str
+    question: str
+    debug_error: Optional[str] = None
+    
 # ---------- LangGraph State 정의 ----------
 class DietRecommendationState(TypedDict):
     question: str
@@ -68,7 +100,9 @@ class DietRecommendationState(TypedDict):
     nutrition_standards: str
     recommended_foods: str
     final_response: str
-    greeting: str  # 추가
+    greeting: str
+    parsed_avoid_foods: List[AvoidFood]  # 추가
+    parsed_recommended_foods: List[RecommendedFood]  # 추가
     current_step: str
     completed_steps: List[str]
     error: Optional[str]
@@ -535,7 +569,7 @@ def get_avoid_foods_tool_func(disease: str) -> str:
         규칙:
         1. "식품군"별로 묶어서 1~2단어로 깔끔하게 표현 (예: '염분이 높은 음식', '가공육', '기름진 음식' 등)
         2. 문서에서 반복 등장하는 음식·식품군은 1줄로 요약
-        3. 예시와 같이 번호를 붙이고, 가능한 한 중복을 최소화하여 3~8개 항목으로 요약
+        3. 각 문장 앞에는 번호를 붙이지 말고, 가능한 한 중복을 최소화하여 3~8개 항목으로 요약
         4. 각 항목 뒤에 괄호로 대표 예시를 함께 표기 (예: '젓갈, 소금, 된장' 등)
         5. 불필요한 부연설명, 의사상담 멘트 등은 쓰지 않는다
 
@@ -594,7 +628,7 @@ def get_nutrition_standards_tool_func(disease: str) -> str:
 1. 위 문서에 명시된 내용만 사용
 2. 영어 문서의 경우 한국어로 번역하여 답변
 3. 최소한의 단어로 깔끔하게 표현
-4. 각 문장 앞에는 번호를 붙이고,문서에서 반복 등장하는 영양 성분은 1줄로 요약
+4. 각 문장 앞에는 번호를 붙이지 말고,문서에서 반복 등장하는 영양 성분은 1줄로 요약
 5. 문서에 직접적으로 명시되어 있지 않더라도 관련 정보가 있으면 간접적으로 표현 가능. 단, 문서에 기반한 추론임을 명시하세요.
 6. 불필요한 부연설명, 의사상담 멘트 금지
 
@@ -916,44 +950,113 @@ def recommend_foods_node(state: DietRecommendationState) -> DietRecommendationSt
             "error": f"음식 추천 오류: {str(e)}",
             "current_step": "error"
         }
+        
+def parse_avoid_foods(avoid_foods_text: str) -> List[AvoidFood]:
+    """피해야 할 음식 텍스트를 구조화된 리스트로 파싱"""
+    avoid_foods = []
+    
+    # 번호로 시작하는 라인들을 찾기
+    lines = avoid_foods_text.strip().split('\n')
+    
+    for line in lines:
+        line = line.strip()
+        if re.match(r'^\d+\.', line):
+            # "1. 고염분 음식 (소금, 가공식품)" 형태 파싱
+            match = re.match(r'^\d+\.\s*([^(]+)\s*\(([^)]+)\)', line)
+            if match:
+                name = match.group(1).strip()
+                examples_str = match.group(2).strip()
+                examples = [ex.strip() for ex in examples_str.split(',')]
+                
+                avoid_foods.append(AvoidFood(
+                    name=name,
+                    examples=examples
+                ))
+    
+    return avoid_foods
+
+def parse_recommended_foods(recommended_foods_text: str) -> List[RecommendedFood]:
+    """추천 음식 텍스트를 구조화된 리스트로 파싱"""
+    recommended_foods = []
+    
+    # 번호로 시작하는 각 음식 항목을 찾기
+    lines = recommended_foods_text.strip().split('\n')
+    
+    for line in lines:
+        line = line.strip()
+        if re.match(r'^\d+\.', line):
+            try:
+                # "1. 단무지무침 - 칼로리: 41.0kcal, 나트륨: 611mg (고혈압에 좋은 이유: ...)" 형태 파싱
+                
+                # 음식명 추출
+                name_match = re.match(r'^\d+\.\s*([^-]+)', line)
+                if not name_match:
+                    continue
+                name = name_match.group(1).strip()
+                
+                # 칼로리 추출
+                calorie_match = re.search(r'칼로리:\s*([\d.]+)kcal', line)
+                calories = float(calorie_match.group(1)) if calorie_match else 0.0
+                
+                # 나트륨 추출
+                sodium_match = re.search(r'나트륨:\s*(\d+)mg', line)
+                sodium = int(sodium_match.group(1)) if sodium_match else 0
+                
+                # 추천 이유 추출
+                reason_match = re.search(r'\(고혈압에 좋은 이유:\s*([^)]+)\)', line)
+                reason = reason_match.group(1).strip() if reason_match else ""
+                
+                recommended_foods.append(RecommendedFood(
+                    name=name,
+                    calories_kcal=calories,
+                    sodium_mg=sodium,
+                    reason=reason
+                ))
+                
+            except Exception as e:
+                print(f"음식 파싱 오류 - {line}: {e}")
+                continue
+    
+    return recommended_foods
 
 def generate_final_response_node(state: DietRecommendationState) -> DietRecommendationState:
     """최종 응답 생성 노드 - 구조화된 데이터 준비"""
     try:
         diseases = state.get("diseases", [])
-        avoid_foods = state.get("avoid_foods", "").strip()
+        avoid_foods_text = state.get("avoid_foods", "").strip()
         nutrition_standards = state.get("nutrition_standards", "").strip()
-        recommended_foods = state.get("recommended_foods", "").strip()
+        recommended_foods_text = state.get("recommended_foods", "").strip()
 
         # 디버깅 로그 추가
         print(f"DEBUG - generate_final_response_node:")
         print(f"  diseases: {diseases}")
-        print(f"  avoid_foods length: {len(avoid_foods)}")
+        print(f"  avoid_foods length: {len(avoid_foods_text)}")
         print(f"  nutrition_standards length: {len(nutrition_standards)}")
-        print(f"  recommended_foods length: {len(recommended_foods)}")
-        print(f"  recommended_foods preview: {recommended_foods[:200]}...")
+        print(f"  recommended_foods length: {len(recommended_foods_text)}")
 
         # 인사말 생성
         greeting = f"안녕하세요! {', '.join(diseases)} 환자님을 위한 식단을 안내해 드립니다."
 
-        # 추천 음식이 없는 경우 처리
-        if not recommended_foods or len(recommended_foods.strip()) == 0:
-            print(f"WARNING: 추천 음식이 비어있습니다. recommended_foods='{recommended_foods}'")
-            recommended_foods = "죄송합니다. 현재 추천할 수 있는 음식 정보를 불러오는 중 문제가 발생했습니다."
+        # 텍스트를 구조화된 데이터로 파싱
+        parsed_avoid_foods = parse_avoid_foods(avoid_foods_text) if avoid_foods_text else []
+        parsed_recommended_foods = parse_recommended_foods(recommended_foods_text) if recommended_foods_text else []
+
+        print(f"DEBUG - Parsed avoid_foods: {len(parsed_avoid_foods)}개")
+        print(f"DEBUG - Parsed recommended_foods: {len(parsed_recommended_foods)}개")
 
         # 기존 final_response는 호환성을 위해 유지
         sections = [greeting]
-        if avoid_foods:
+        if avoid_foods_text:
             sections.append("===== 피해야 할 음식 =====")
-            sections.append(avoid_foods)
+            sections.append(avoid_foods_text)
         if nutrition_standards:
             sections.append("\n===== 영양 섭취 기준 =====")
             sections.append(nutrition_standards)
-        sections.append("\n===== 추천 음식 =====")
-        sections.append(recommended_foods)
+        if recommended_foods_text:
+            sections.append("\n===== 추천 음식 =====")
+            sections.append(recommended_foods_text)
 
         final_response = "\n".join(sections)
-        print(f"DEBUG: 최종 응답 길이: {len(final_response)}")
 
         # 상태 누적 (불변성 보장)
         prev_logs = state.get("agent_logs", [])
@@ -964,7 +1067,9 @@ def generate_final_response_node(state: DietRecommendationState) -> DietRecommen
         return {
             **state,
             "final_response": final_response,
-            "greeting": greeting,  # 인사말 별도 저장
+            "greeting": greeting,
+            "parsed_avoid_foods": parsed_avoid_foods,  # 파싱된 데이터 추가
+            "parsed_recommended_foods": parsed_recommended_foods,  # 파싱된 데이터 추가
             "current_step": "completed",
             "completed_steps": new_completed,
             "agent_logs": new_logs
@@ -976,7 +1081,7 @@ def generate_final_response_node(state: DietRecommendationState) -> DietRecommen
             "error": f"최종 응답 생성 오류: {e}",
             "current_step": "error"
         }
-
+        
 def error_node(state: DietRecommendationState) -> DietRecommendationState:
     """에러 처리 노드"""
     error_message = state.get("error", "알 수 없는 오류가 발생했습니다.")
@@ -1101,25 +1206,6 @@ def create_diet_recommendation_graph():
 
 # 전역 그래프 인스턴스 생성
 diet_recommendation_graph = create_diet_recommendation_graph()
-
-# ---------- API 모델 ----------
-class AskRequest(BaseModel):
-    question: str
-
-class DebugRequest(BaseModel):
-    query: str
-    doc_type: str  # 'vectordb' or 'nutrition'
-
-# 응답 모델 추가
-class DietRecommendationResponse(BaseModel):
-    diseases: List[str]
-    avoid_foods: str
-    nutrition_standards: str
-    recommended_foods: str
-    greeting: str
-    status: str
-    question: str
-    debug_error: Optional[str] = None
     
 @app.get("/")
 def root():
@@ -1149,7 +1235,9 @@ def ask(request: AskRequest):
             "nutrition_standards": "",
             "recommended_foods": "",
             "final_response": "",
-            "greeting": "",  # 추가
+            "greeting": "",
+            "parsed_avoid_foods": [],  # 추가
+            "parsed_recommended_foods": [],  # 추가
             "current_step": "extract_disease",
             "completed_steps": [],
             "error": None,
@@ -1160,13 +1248,71 @@ def ask(request: AskRequest):
         
         return DietRecommendationResponse(
             diseases=final_state.get("diseases", []),
-            avoid_foods=final_state.get("avoid_foods", ""),
+            avoid_foods=final_state.get("parsed_avoid_foods", []),
             nutrition_standards=final_state.get("nutrition_standards", ""),
-            recommended_foods=final_state.get("recommended_foods", ""),
+            recommended_foods=final_state.get("parsed_recommended_foods", []),
             greeting=final_state.get("greeting", ""),
             status="success" if not final_state.get("error") else "error",
             question=request.question
         )
+        
+    except Exception as e:
+        error_msg = str(e)
+        print(f"에러 발생: {error_msg}")
+        
+        return DietRecommendationResponse(
+            diseases=[],
+            avoid_foods=[],
+            nutrition_standards="",
+            recommended_foods=[],
+            greeting="",
+            status="error",
+            question=request.question,
+            debug_error=error_msg
+        )
+
+# ---------- 호환성을 위한 기존 API도 유지 ----------
+@app.post("/ask-simple")
+def ask_simple(request: AskRequest):
+    """기존 방식의 단순한 응답 (호환성 유지용)"""
+    try:
+        print(f"받은 질문: {request.question}")
+        
+        # LangGraph 사용
+        initial_state = {
+            "question": request.question,
+            "diseases": [],
+            "avoid_foods": "",
+            "nutrition_standards": "",
+            "recommended_foods": "",
+            "final_response": "",
+            "greeting": "",
+            "parsed_avoid_foods": [],
+            "parsed_recommended_foods": [],
+            "current_step": "extract_disease",
+            "completed_steps": [],
+            "error": None,
+            "agent_logs": []
+        }
+        
+        final_state = diet_recommendation_graph.invoke(initial_state)
+        
+        return {
+            "response": final_state.get("final_response", "응답 생성에 실패했습니다."),
+            "status": "success" if not final_state.get("error") else "error",
+            "question": request.question
+        }
+        
+    except Exception as e:
+        error_msg = str(e)
+        print(f"에러 발생: {error_msg}")
+        
+        return {
+            "error": "일시적인 오류가 발생했습니다. 잠시 후 다시 시도해주세요.",
+            "status": "error",
+            "question": request.question,
+            "debug_error": error_msg
+        }
         
     except Exception as e:
         error_msg = str(e)

@@ -2,8 +2,14 @@ import pandas as pd
 import os
 import time
 import pymysql
+import shutil
+import requests
+import chromadb
+import operator
 from dotenv import load_dotenv
 from sqlalchemy import create_engine, text
+from urllib.parse import quote_plus
+from typing import TypedDict, Optional, List
 
 from fastapi import FastAPI
 from pydantic import BaseModel
@@ -17,7 +23,8 @@ from langchain.chains import RetrievalQA
 from langchain.agents import Tool, initialize_agent
 from langchain.agents.agent_types import AgentType
 from langchain.schema import Document
-from urllib.parse import quote_plus
+
+from langgraph.graph import StateGraph, END
 
 load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -30,19 +37,131 @@ DB_CONFIG = {
     'port': 3306,
     'user': 'toy4_user',
     'password': os.getenv('MYSQL_PASSWORD'), 
-    'database': os.getenv('MYSQL_DATABASE', 'nutrition_db'),  # 데이터베이스명
+    'database': os.getenv('MYSQL_DATABASE', 'nutrition_db'),
     'charset': 'utf8mb4'
 }
 
 encoded_password = quote_plus(DB_CONFIG['password'])
 
-# SQLAlchemy 엔진 생성
 engine = create_engine(
     f"mysql+pymysql://{DB_CONFIG['user']}:{encoded_password}@{DB_CONFIG['host']}:{DB_CONFIG['port']}/{DB_CONFIG['database']}?charset=utf8mb4"
 )
 
+# ---------- Vector DB API 설정 ----------
+VECTOR_DB_API_URL = "http://155.248.175.96:8000"
+TARGET_COLLECTION_NAME = "disease_data"
+
+# ChromaDB 클라이언트 초기화
+chroma_client = None
+try:
+    chroma_client = chromadb.HttpClient(host="155.248.175.96", port=8000)
+    print("ChromaDB HttpClient 성공적으로 초기화됨.")
+except Exception as e:
+    print(f"ChromaDB HttpClient 초기화 오류: {e}")
+    chroma_client = None
+    
+# ---------- LangGraph State 정의 ----------
+class DietRecommendationState(TypedDict):
+    # 입력
+    question: str
+    
+    # 각 단계별 결과
+    diseases: List[str]
+    avoid_foods: str
+    nutrition_standards: str
+    recommended_foods: str
+    
+    # 최종 결과
+    final_response: str
+    
+    # 에러 처리
+    error: str
+    
+    # 진행 상태 추적
+    current_step: str
+    completed_steps: List[str]
+    agent_logs: List[str]
+
+def query_vector_db(query: str, k: int = 10):
+    """ChromaDB Python 클라이언트를 사용하여 쿼리를 보내고 결과를 받아옴"""
+    if chroma_client is None:
+        print("ChromaDB 클라이언트가 초기화되지 않았습니다. 쿼리 불가.")
+        return []
+
+    try:
+        try:
+            target_collection = chroma_client.get_collection(name=TARGET_COLLECTION_NAME)
+            print(f"사용할 컬렉션: {TARGET_COLLECTION_NAME}")
+        except Exception as e:
+            print(f"컬렉션 '{TARGET_COLLECTION_NAME}'을(를) 찾을 수 없습니다: {e}")
+            return []
+        
+        results = target_collection.query(
+            query_texts=[query],
+            n_results=k,
+            include=["documents", "metadatas", "distances"]
+        )
+        
+        print(f"ChromaDB 쿼리 성공. 결과 수: {len(results.get('documents', []))}")
+        
+        return_docs = []
+        if results and 'documents' in results and results['documents']:
+            for i, doc_content in enumerate(results['documents'][0]):
+                metadata = results['metadatas'][0][i] if 'metadatas' in results and results['metadatas'] and results['metadatas'][0] else {}
+                distance = results['distances'][0][i] if 'distances' in results and results['distances'] and results['distances'][0] else None
+                
+                return_docs.append({
+                    "document": doc_content,
+                    "metadata": metadata,
+                    "distance": distance
+                })
+        return return_docs
+            
+    except Exception as e:
+        print(f"Vector DB 쿼리 처리 오류 (ChromaDB 클라이언트): {e}")
+        return []
+    
+# ---------- Rate Limit을 고려한 배치 임베딩 함수 ----------
+def create_embeddings_with_retry(documents, batch_size=50, delay=5):
+    """Rate Limit을 피하기 위해 배치로 임베딩 생성"""
+    embedding = OpenAIEmbeddings()
+    all_embeddings = []
+    
+    for i in range(0, len(documents), batch_size):
+        batch = documents[i:i+batch_size]
+        print(f"배치 {i//batch_size + 1}/{(len(documents)-1)//batch_size + 1} 처리 중... ({len(batch)}개 문서)")
+        
+        try:
+            # 배치 임베딩 생성
+            batch_embeddings = embedding.embed_documents([doc.page_content for doc in batch])
+            all_embeddings.extend(batch_embeddings)
+            
+            # Rate Limit 방지를 위한 지연
+            if i + batch_size < len(documents):
+                print(f"{delay}초 대기 중...")
+                time.sleep(delay)
+                
+        except Exception as e:
+            print(f"배치 {i//batch_size + 1} 임베딩 실패: {e}")
+            # Rate Limit 오류인 경우 더 긴 지연
+            if "rate_limit" in str(e).lower():
+                print("Rate Limit 감지. 30초 대기 후 재시도...")
+                time.sleep(30)
+                try:
+                    batch_embeddings = embedding.embed_documents([doc.page_content for doc in batch])
+                    all_embeddings.extend(batch_embeddings)
+                except Exception as retry_error:
+                    print(f"재시도 실패: {retry_error}")
+                    # 실패한 배치는 빈 임베딩으로 처리
+                    all_embeddings.extend([[0] * 1536] * len(batch))
+            else:
+                # 다른 오류는 빈 임베딩으로 처리
+                all_embeddings.extend([[0] * 1536] * len(batch))
+    
+    return all_embeddings
+
 # ---------- MySQL에서 식품 데이터 조회 및 텍스트 변환 ----------
-def fetch_nutrition_data_from_mysql():
+def fetch_nutrition_data_from_mysql(limit=1000):
     """MySQL에서 식품 영양 정보를 조회하여 텍스트 형태로 변환"""
     try:
         # 새로운 컬럼 매핑
@@ -75,53 +194,174 @@ def fetch_nutrition_data_from_mysql():
         }
         
         # MySQL에서 데이터 조회
-        query = """
-        SELECT name, energy_kcal, moisture_g, protein_g, fat_g, ash_g, carbohydrate_g, sugar_g, dietary_fiber_g, calcium_mg, iron_mg, phosphorus_mg, 
-               potassium_mg, sodium_mg, vitamin_a_rae_ug, retinol_ug, beta_carotene_ug, thiamine_mg, riboflavin_mg, niacin_mg, vitamin_d_ug, 
-               cholesterol_mg, saturated_fatty_acids_g, trans_fat_g, food_weight_g
-        FROM food_nutritional_ingredients 
+        query = f"""
+        SELECT * FROM food_nutritional_ingredients 
         WHERE name IS NOT NULL 
         AND energy_kcal > 0
         ORDER BY RAND()
-        LIMIT 1000
+        LIMIT {limit}
         """
         
         df = pd.read_sql(query, engine)
         print(f"MySQL에서 조회된 식품 데이터: {len(df)}개")
         
-        # 텍스트 문서로 변환
-        documents = []
-        for _, row in df.iterrows():
-            items = []
-            for col, korean_name in column_mapping.items():
-                if col in df.columns and pd.notna(row[col]) and row[col] != '':
-                    val = row[col]
-                    if isinstance(val, (int, float)) and val > 0:
-                        if col in ['energy_kcal', 'protein_g', 'fat_g', 'carbohydrate_g', 'dietary_fiber_g']:
-                            formatted_val = f"{val:.1f}"
-                        elif col in ['sodium_mg', 'cholesterol_mg', 'calcium_mg', 'iron_mg', 'potassium_mg']:
-                            formatted_val = f"{int(val)}"
-                        elif 'vitamin' in col or 'thiamine' in col or 'riboflavin' in col or 'niacin' in col:
-                            formatted_val = f"{val:.2f}" if val < 1 else f"{val:.1f}"
-                        else:
-                            formatted_val = str(val)
-                        items.append(f"{korean_name}: {formatted_val}")
-            
-            if len(items) >= 3:  # 최소 3개 이상의 영양소 정보가 있는 경우만 포함
-                content = " | ".join(items)
-                doc = Document(page_content=content, metadata={"source": "mysql_nutrition"})
-                documents.append(doc)
-        
-        print(f"변환된 문서: {len(documents)}개")
-        return documents
-        
     except Exception as e:
         print(f"MySQL 데이터 조회 오류: {e}")
         return []
+    
+# ---------- 동적 영양 조건 추출 및 쿼리 생성 함수들 ----------
+def extract_nutrition_criteria_from_standards(nutrition_standards: str, disease: str) -> dict:
+    """영양 기준 정보에서 MySQL 쿼리에 사용할 수치 조건들을 추출"""
+    extract_criteria_prompt = PromptTemplate(
+        input_variables=["nutrition_standards", "disease"],
+        template="""아래 {disease} 환자의 영양 기준 정보에서 구체적인 수치(숫자와 단위)가 포함된 문장만 분석하여 JSON으로 추출하세요.
+
+영양 기준 정보:
+{nutrition_standards}
+
+다음 영양소들에 대한 구체적인 수치 조건만 찾아서 JSON 형태로 출력하세요:
+- sodium_mg: 나트륨 (mg 단위)
+- sugar_g: 당류 (g 단위)  
+- carbohydrate_g: 탄수화물 (g 단위)
+- fat_g: 지방 (g 단위)
+- cholesterol_mg: 콜레스테롤 (mg 단위)
+- protein_g: 단백질 (g 단위)
+- energy_kcal: 에너지 (kcal 단위)
+- dietary_fiber_g: 식이섬유 (g 단위)
+
+추출 규칙:
+1. 반드시 수치(숫자)와 단위가 명시된 내용만 추출
+2. "이내", "이하", "미만" 등은 최대값(max_)으로 처리
+3. "이상", "최소" 등은 최소값(min_)으로 처리
+4. 수치가 없거나 모호한 표현("적절히", "제한", "권장")은 무시
+5. 빈 결과라면 {{}}로 출력
+
+가능한 필드명:
+- max_sodium_mg: 나트륨 최대 섭취량
+- max_sugar_g: 당류 최대 섭취량  
+- max_carbohydrate_g: 탄수화물 최대 섭취량
+- max_cholesterol_mg: 콜레스테롤 최대 섭취량
+- min_protein_g: 단백질 최소 섭취량
+- max_fat_pct: 지방 최대 비율(%)
+- min_fat_pct: 지방 최소 비율(%)
+
+나쁜 예시:
+- "나트륨 섭취를 제한" → 수치가 없으므로 포함하지 않음
+- "적절한 단백질 섭취" → 수치가 없으므로 포함하지 않음
+
+JSON 형태로만 출력:"""
+    )
+    
+    try:
+        from langchain.chains import LLMChain
+        extract_chain = LLMChain(llm=llm, prompt=extract_criteria_prompt)
+        result = extract_chain.run({
+            "nutrition_standards": nutrition_standards,
+            "disease": disease
+        }).strip()
+        
+        print(f"\n추출된 영양 조건 (raw): {result}")
+        
+        # JSON 파싱 시도 - 더 robust하게 개선
+        import json
+        import re
+        
+        # 1. JSON 블록 추출 (```json이나 ``` 태그 제거)
+        cleaned_result = re.sub(r'```json\s*', '', result)
+        cleaned_result = re.sub(r'```\s*', '', cleaned_result)
+        cleaned_result = cleaned_result.strip()
+        
+        # 2. JSON 객체 부분만 추출
+        json_match = re.search(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', cleaned_result, re.DOTALL)
+        if json_match:
+            json_str = json_match.group().strip()
+            print(f"추출된 JSON 문자열: {json_str}")
+            
+            try:
+                criteria = json.loads(json_str)
+                print(f"파싱된 영양 조건: {criteria}")
+                
+                # 숫자가 아닌 값들 제거
+                clean_criteria = {}
+                for key, value in criteria.items():
+                    if isinstance(value, (int, float)) and value > 0:
+                        clean_criteria[key] = value
+                    elif isinstance(value, str) and value.replace('.', '').isdigit():
+                        clean_criteria[key] = float(value)
+                
+                print(f"정리된 영양 조건: {clean_criteria}")
+                return clean_criteria
+                
+            except json.JSONDecodeError as je:
+                print(f"JSON 파싱 오류: {je}")
+                return {}
+        else:
+            print("JSON 형태를 찾을 수 없습니다.")
+            return {}
+            
+    except Exception as e:
+        print(f"영양 조건 추출 오류: {e}")
+        return {}
+
+def build_dynamic_mysql_query(criteria: dict) -> tuple:
+    """추출된 영양 조건을 바탕으로 동적 MySQL 쿼리 생성"""
+    base_query = """
+    SELECT name, energy_kcal, protein_g, fat_g, carbohydrate_g, sugar_g, 
+           sodium_mg, cholesterol_mg, calcium_mg, iron_mg, potassium_mg,
+           dietary_fiber_g, vitamin_a_rae_ug
+    FROM food_nutritional_ingredients 
+    WHERE name IS NOT NULL AND energy_kcal > 0
+    """
+    
+    conditions = []
+    params = {}
+    
+    # 동적으로 조건 추가
+    for key, value in criteria.items():
+        if key.startswith("max_"):
+            column_name = key[4:]  # "max_" 제거
+            if column_name in ['sodium_mg', 'sugar_g', 'carbohydrate_g', 'fat_g', 
+                             'cholesterol_mg', 'energy_kcal', 'dietary_fiber_g']:
+                conditions.append(f"{column_name} <= :{key}")
+                params[key] = value
+                
+        elif key.startswith("min_"):
+            column_name = key[4:]  # "min_" 제거
+            if column_name in ['protein_g', 'dietary_fiber_g', 'calcium_mg', 
+                             'iron_mg', 'potassium_mg', 'vitamin_a_rae_ug']:
+                conditions.append(f"{column_name} >= :{key}")
+                params[key] = value
+    
+    # 조건이 있으면 추가
+    if conditions:
+        query = base_query + " AND " + " AND ".join(conditions) + " ORDER BY RAND() LIMIT 200"
+    else:
+        # 조건이 없으면 기본적으로 건강한 음식 위주로
+        query = base_query + " AND sodium_mg < 500 ORDER BY RAND() LIMIT 200"
+    
+    print(f"생성된 쿼리: {query}")
+    print(f"쿼리 파라미터: {params}")
+    
+    return query, params
+
+def search_foods_by_dynamic_condition(criteria: dict):
+    """동적으로 생성된 조건으로 음식 검색"""
+    try:
+        query, params = build_dynamic_mysql_query(criteria)
+        df = pd.read_sql(text(query), engine, params=params)
+        print(f"동적 조건으로 검색된 음식: {len(df)}개")
+        return df
+        
+    except Exception as e:
+        print(f"동적 조건 음식 검색 오류: {e}")
+        return pd.DataFrame()
 
 # ---------- 특정 조건으로 음식 검색 함수 ----------
 def search_foods_by_condition(condition_type: str, **kwargs):
-    """특정 조건에 맞는 음식을 MySQL에서 검색"""
+    """
+    특정 조건에 맞는 음식을 MySQL에서 검색
+    *** 하드코딩 부분 제거, 기본 조건만 유지 ***
+    """
     try:
         base_query = """
         SELECT name, energy_kcal, protein_g, fat_g, carbohydrate_g, sugar_g, 
@@ -131,163 +371,126 @@ def search_foods_by_condition(condition_type: str, **kwargs):
         WHERE name IS NOT NULL AND energy_kcal > 0
         """
         
-        conditions = []
-        params = {}
-        
-        if condition_type == "low_sodium":
-            conditions.append("sodium_mg < :max_sodium")
-            params['max_sodium'] = kwargs.get('max_sodium', 200)
-            
-        elif condition_type == "high_protein":
-            conditions.append("protein_g > :min_protein")
-            params['min_protein'] = kwargs.get('min_protein', 10)
-            
-        elif condition_type == "low_fat":
-            conditions.append("fat_g < :max_fat")
-            params['max_fat'] = kwargs.get('max_fat', 5)
-            
-        elif condition_type == "diabetic_friendly":
-            conditions.extend([
-                "sugar_g < :max_sugar",
-                "carbohydrate_g < :max_carb",
-                "sodium_mg < :max_sodium"
-            ])
-            params.update({
-                'max_sugar': kwargs.get('max_sugar', 5),
-                'max_carb': kwargs.get('max_carb', 30),
-                'max_sodium': kwargs.get('max_sodium', 300)
-            })
-        
-        if conditions:
-            query = base_query + " AND " + " AND ".join(conditions) + " ORDER BY RAND() LIMIT 50"
+        # 기본 건강한 음식 조건만 유지 (fallback용)
+        if condition_type == "healthy_default":
+            query = base_query + " AND sodium_mg < 500 AND energy_kcal < 300 ORDER BY RAND() LIMIT 200"
         else:
-            query = base_query + " ORDER BY RAND() LIMIT 50"
+            query = base_query + " ORDER BY RAND() LIMIT 200"
         
-        df = pd.read_sql(text(query), engine, params=params)
+        df = pd.read_sql(query, engine)
         return df
         
     except Exception as e:
         print(f"조건별 음식 검색 오류: {e}")
         return pd.DataFrame()
+    
+# ---------- 영양 정보 데이터 준비 ----------
+print("영양 정보 데이터 로딩 시작...")
+nutrition_docs = fetch_nutrition_data_from_mysql(limit=500)  # 500개로 제한
 
-# ---------- PDF 파일 로딩 (기존 유지) ----------
-pdf_loader = DirectoryLoader("./docs", glob="**/*.pdf", loader_cls=PyPDFLoader)
-pdf_documents = pdf_loader.load()
-
-print(f"로드된 PDF 문서: {len(pdf_documents)}개")
-
-# 텍스트 분할
-pdf_text_splitter = CharacterTextSplitter(
-    chunk_size=1000,
-    chunk_overlap=100,
-    separator="\n"
-)
-nutrition_text_splitter = CharacterTextSplitter(
-    chunk_size=200,  # 영양 정보는 더 작은 청크로
-    chunk_overlap=20,
-    separator="\n"
-)
-
-pdf_docs = pdf_text_splitter.split_documents(pdf_documents) if pdf_documents else []
-
-# MySQL에서 영양 데이터 가져오기
-nutrition_docs = fetch_nutrition_data_from_mysql()
 if nutrition_docs:
+    nutrition_text_splitter = CharacterTextSplitter(
+        chunk_size=200,
+        chunk_overlap=20,
+        separator="\n"
+    )
     nutrition_docs = nutrition_text_splitter.split_documents(nutrition_docs)
+    print(f"분할된 영양정보 청크: {len(nutrition_docs)}개")
 
-print(f"분할된 PDF 청크: {len(pdf_docs)}개")
-print(f"분할된 영양정보 청크: {len(nutrition_docs)}개")
-
-# ---------- 벡터 DB ----------
+# ---------- 벡터 DB (기존 벡터DB가 있으면 재사용, 없으면 생성) ----------
 embedding = OpenAIEmbeddings()
+vectordb_nutrition = None
+retriever_nutrition = None
 
-import shutil
-if os.path.exists("./vector_db_pdf"):
-    shutil.rmtree("./vector_db_pdf")
-if os.path.exists("./vector_db_nutrition"):
-    shutil.rmtree("./vector_db_nutrition")
+vector_db_path = "./vector_db_nutrition"
 
-if pdf_docs:
-    vectordb_pdf = Chroma.from_documents(pdf_docs, embedding, persist_directory="./vector_db_pdf")
-    vectordb_pdf.persist()
-    retriever_pdf = vectordb_pdf.as_retriever(search_kwargs={"k": 10})
-else:
-    vectordb_pdf = None
-    retriever_pdf = None
+# 기존 벡터 DB 확인
+if os.path.exists(vector_db_path) and os.listdir(vector_db_path):
+    try:
+        print("기존 벡터 DB 로딩 중...")
+        vectordb_nutrition = Chroma(persist_directory=vector_db_path, embedding_function=embedding)
+        retriever_nutrition = vectordb_nutrition.as_retriever(search_kwargs={"k": 15})
+        print("기존 벡터 DB 로딩 완료")
+    except Exception as e:
+        print(f"기존 벡터 DB 로딩 실패: {e}")
+        print("새로운 벡터 DB 생성을 진행합니다.")
+        if os.path.exists(vector_db_path):
+            shutil.rmtree(vector_db_path)
 
-if nutrition_docs:
-    vectordb_nutrition = Chroma.from_documents(nutrition_docs, embedding, persist_directory="./vector_db_nutrition")
-    vectordb_nutrition.persist()
-    retriever_nutrition = vectordb_nutrition.as_retriever(search_kwargs={"k": 15})
-else:
-    vectordb_nutrition = None
-    retriever_nutrition = None
+# 벡터 DB가 없거나 로딩 실패한 경우 새로 생성
+if vectordb_nutrition is None and nutrition_docs:
+    print("새로운 벡터 DB 생성 중...")
+    try:
+        # 배치로 나누어 처리
+        batch_size = 20  # 더 작은 배치 사이즈
+        total_batches = (len(nutrition_docs) - 1) // batch_size + 1
+        
+        print(f"총 {len(nutrition_docs)}개 문서를 {total_batches}개 배치로 나누어 처리")
+        
+        # 첫 번째 배치로 벡터 DB 초기화
+        first_batch = nutrition_docs[:batch_size]
+        vectordb_nutrition = Chroma.from_documents(
+            first_batch, 
+            embedding, 
+            persist_directory=vector_db_path
+        )
+        vectordb_nutrition.persist()
+        print(f"첫 번째 배치 ({len(first_batch)}개) 처리 완료")
+        
+        # 나머지 배치들 순차 처리
+        for i in range(batch_size, len(nutrition_docs), batch_size):
+            batch = nutrition_docs[i:i+batch_size]
+            batch_num = i // batch_size + 1
+            
+            print(f"배치 {batch_num}/{total_batches} 처리 중... ({len(batch)}개 문서)")
+            
+            try:
+                vectordb_nutrition.add_documents(batch)
+                vectordb_nutrition.persist()
+                
+                # Rate Limit 방지를 위한 지연
+                if i + batch_size < len(nutrition_docs):
+                    print("Rate Limit 방지를 위해 10초 대기...")
+                    time.sleep(10)
+                    
+            except Exception as batch_error:
+                print(f"배치 {batch_num} 처리 실패: {batch_error}")
+                if "rate_limit" in str(batch_error).lower():
+                    print("Rate Limit 감지. 30초 대기 후 재시도...")
+                    time.sleep(30)
+                    try:
+                        vectordb_nutrition.add_documents(batch)
+                        vectordb_nutrition.persist()
+                        print(f"배치 {batch_num} 재시도 성공")
+                    except Exception as retry_error:
+                        print(f"배치 {batch_num} 재시도 실패: {retry_error}")
+                        continue
+        
+        retriever_nutrition = vectordb_nutrition.as_retriever(search_kwargs={"k": 15})
+        print("새로운 벡터 DB 생성 완료")
+        
+    except Exception as e:
+        print(f"벡터 DB 생성 실패: {e}")
+        vectordb_nutrition = None
+        retriever_nutrition = None
 
 # ---------- LLM 및 Chain 설정 ----------
-llm = ChatOpenAI(model="gpt-3.5-turbo", temperature=0.1, max_tokens=500)
-
-# PDF용 QA Chain (의료 정보) - 기존과 동일
-if retriever_pdf:
-    pdf_prompt = PromptTemplate(
-        template="""**중요: 아래 제공된 문서 내용만을 사용하여 답변하세요. 문서가 영어인 경우 한국어로 번역하여 답변하세요.**
-
-제공된 문서:
-{context}
-
-질문: {question}
-
-답변 규칙:
-1. 위 문서에 명시된 내용만 사용
-2. 영어 문서의 경우 한국어로 번역하여 답변
-3. 문서에 직접적으로 명시되어 있지 않더라도 관련 정보가 있으면 간접적으로 설명해도 됩니다. 단, 문서에 기반한 추론임을 명시하세요.
-4. 의료적 정보는 정확하게 전달하되, "의사와 상담" 같은 멘트는 절대 포함하지 마세요
-
-답변:""",
-        input_variables=["context", "question"]
-    )
-    qa_chain_pdf = RetrievalQA.from_chain_type(
-        llm=llm, 
-        retriever=retriever_pdf, 
-        chain_type="stuff",
-        chain_type_kwargs={"prompt": pdf_prompt}
-    )
-
-# 영양정보용 QA Chain (MySQL 데이터)
-if retriever_nutrition:
-    nutrition_prompt = PromptTemplate(
-        template="""**중요: 오직 아래 제공된 영양 데이터만을 사용하여 답변하세요.**
-
-제공된 영양 데이터:
-{context}
-
-질문: {question}
-
-답변 규칙:
-1. 위 데이터에 있는 음식과 영양성분만 언급
-2. 데이터에 없는 음식은 언급하지 마세요
-3. 데이터에 없으면 "제공된 영양 데이터에서 해당 정보를 찾을 수 없습니다"라고 답변
-
-답변:""",
-        input_variables=["context", "question"]
-    )
-    qa_chain_nutrition = RetrievalQA.from_chain_type(
-        llm=llm, 
-        retriever=retriever_nutrition, 
-        chain_type="stuff",
-        chain_type_kwargs={"prompt": nutrition_prompt}
-    )
+llm = ChatOpenAI(model="gpt-3.5-turbo", temperature=0.1, max_tokens=4096)
 
 # ---------- Tool 함수들 ----------
 def extract_disease_tool_func(question: str) -> str:
     extract_prompt = PromptTemplate(
         input_variables=["question"],
-        template="""질문에서 질병명이나 건강 상태만 간단히 추출하세요. 영어든 한국어든 상관없이 추출하세요.
+        template="""다음 사용자 질문에서 질병이나 건강 상태를 모두 리스트로 추출하세요.
+    영어든 한국어든 상관없이 추출하세요. 형식은 쉼표로 구분된 한글 질병명만 나열합니다.  
 
 예시:
 질문: "당뇨가 있는데 저녁 추천해줘" → 답변: "당뇨"
 질문: "고혈압 환자인데 뭘 먹을까?" → 답변: "고혈압"
 질문: "나는 gout 가 있는데 저녁 메뉴 추천 해주셈" → 답변: "gout"
 질문: "나는 간경변이 있는데 저녁 메뉴 추천 해주셈" → 답변: "간경변"
+질문: "고혈압하고 통풍이 있어요" → "고혈압, 통풍"
+질문: "당뇨, 고지혈증 모두 있는데 식단 알려줘" → "당뇨, 고지혈증"
 
 질문: {question}
 답변:"""
@@ -299,21 +502,19 @@ def extract_disease_tool_func(question: str) -> str:
     return result
 
 def get_avoid_foods_tool_func(disease: str) -> str:
-    if not retriever_pdf:
-        return "PDF 문서가 없어 피해야 할 음식 정보를 찾을 수 없습니다."
-    
+    """Vector DB API를 사용하여 피해야 할 음식 정보 검색"""
     search_query_prompt = PromptTemplate(
         input_variables=["disease"],
         template="""질병명 "{disease}"를 기반으로 피해야 할 음식 정보를 찾기 위한 검색 쿼리를 생성하세요.
 
-다음을 포함하세요:
-- 질병명 한국어 표현
-- 질병명 영어 표현 
-- 피해야 할 음식, 금지 식품, 섭취 제한, 식이 조절, 나트륨/지방 제한 등 키워드
-- 한국어와 영어 키워드를 모두 포함
+    다음을 포함하세요:
+    - 질병명 한국어 표현
+    - 질병명 영어 표현 
+    - 피해야 할 음식, 금지 식품, 섭취 제한, 식이 조절, 나트륨/지방 제한 등 키워드
+    - 한국어와 영어 키워드를 모두 포함
 
-질병명: {disease}
-생성할 검색 쿼리:"""
+    질병명: {disease}
+    생성할 검색 쿼리:"""
     )
     
     from langchain.chains import LLMChain
@@ -321,18 +522,47 @@ def get_avoid_foods_tool_func(disease: str) -> str:
     search_query = query_chain.run({"disease": disease}).strip()
     
     try:
-        result = qa_chain_pdf.run(search_query)
-        if "제공된 문서에서" not in result and len(result.strip()) > 20:
-            return f"{disease} 환자가 피해야 할 음식 정보:\n{result}"
+        # Vector DB API 호출
+        documents = query_vector_db(search_query, k=10)
+        
+        if not documents:
+            return f"Vector DB에서 {disease}의 영양 기준 정보를 찾을 수 없습니다."
+        
+        # 문서 내용을 컨텍스트로 구성
+        context = "\n".join([str(doc) for doc in documents])
+        
+        # LLM으로 답변 생성
+        answer_prompt = PromptTemplate(
+            input_variables=["context", "disease"],
+            template="""
+        **아래 문서 내용만 사용하여, 질병명 "{disease}" 환자가 반드시 피해야 할 음식(또는 식품군)만 한국어로 나열하세요.**
+        문서가 영어라면 한국어로 번역해 주세요.
+
+        제공된 문서:
+        {context}
+
+        답변 규칙:
+        1. 숫자·단위를 포함할 필요 없음. 음식명만 콤마(,)로 구분해 나열
+        2. 영양 기준이나 일반 권장사항은 쓰지 말 것
+        3. "의사와 상담" 등 불필요한 멘트 금지
+
+        피해야 할 음식 목록:
+        """
+        )
+        
+        answer_chain = LLMChain(llm=llm, prompt=answer_prompt)
+        result = answer_chain.run({"context": context, "disease": disease})
+        
+        if len(result.strip()) > 20:
+            return f"{disease} 환자의 영양 기준 정보:\n{result}"
         else:
-            return f"제공된 문서에서 {disease}의 피해야 할 음식 정보를 찾을 수 없습니다."
+            return f"제공된 문서에서 {disease}의 영양 기준 정보를 찾을 수 없습니다."
+            
     except Exception as e:
         return f"검색 중 오류가 발생했습니다: {str(e)}"
-
-def get_nutrition_standards_tool_func(disease: str) -> str:
-    if not retriever_pdf:
-        return "PDF 문서가 없어 영양 기준 정보를 찾을 수 없습니다."
     
+def get_nutrition_standards_tool_func(disease: str) -> str:
+    """Vector DB API를 사용하여 영양 기준 정보 검색"""
     search_query_prompt = PromptTemplate(
         input_variables=["disease"],
         template="""질병명 "{disease}"를 기반으로 영양 기준 정보를 찾기 위한 검색 쿼리를 생성하세요.
@@ -352,18 +582,49 @@ def get_nutrition_standards_tool_func(disease: str) -> str:
     search_query = query_chain.run({"disease": disease}).strip()
     
     try:
-        result = qa_chain_pdf.run(search_query)
-        if "제공된 문서에서" not in result and len(result.strip()) > 20:
+        # Vector DB API 호출
+        documents = query_vector_db(search_query, k=10)
+        
+        if not documents:
+            return f"Vector DB에서 {disease}의 영양 기준 정보를 찾을 수 없습니다."
+        
+        # 문서 내용을 컨텍스트로 구성
+        context = "\n".join([str(doc) for doc in documents])
+        
+        # LLM으로 답변 생성
+        answer_prompt = PromptTemplate(
+            template="""**중요: 아래 제공된 문서 내용만을 사용하여 답변하세요. 문서가 영어인 경우 한국어로 번역하여 답변하세요.**
+
+제공된 문서:
+{context}
+
+질문: {disease} 환자의 영양 섭취 기준은 무엇인가요?
+
+답변 규칙:
+1. 위 문서에 명시된 내용만 사용
+2. 영어 문서의 경우 한국어로 번역하여 답변
+3. 문서에 직접적으로 명시되어 있지 않더라도 관련 정보가 있으면 간접적으로 설명해도 됩니다. 단, 문서에 기반한 추론임을 명시하세요.
+4. 의료적 정보는 정확하게 전달하되, "의사와 상담" 같은 멘트는 절대 포함하지 마세요
+
+답변:""",
+            input_variables=["context", "disease"]
+        )
+        
+        answer_chain = LLMChain(llm=llm, prompt=answer_prompt)
+        result = answer_chain.run({"context": context, "disease": disease})
+        
+        if len(result.strip()) > 20:
             return f"{disease} 환자의 영양 기준 정보:\n{result}"
         else:
             return f"제공된 문서에서 {disease}의 영양 기준 정보를 찾을 수 없습니다."
+            
     except Exception as e:
         return f"검색 중 오류가 발생했습니다: {str(e)}"
 
 def recommend_foods_tool_func(input_str: str) -> str:
     """
-    입력 형식: "질병명|피해야할음식|영양기준"
-    MySQL 데이터베이스에서 조건에 맞는 음식 추천
+    개선된 음식 추천 함수 - 동적 조건 생성 사용
+    *** 하드코딩된 질병별 분기 완전 제거 ***
     """
     if not retriever_nutrition:
         return "영양 데이터가 없어 음식을 추천할 수 없습니다."
@@ -377,72 +638,88 @@ def recommend_foods_tool_func(input_str: str) -> str:
     if not disease:
         return "질병명이 제공되지 않아 추천이 불가능합니다."
     
-    print(f"\n음식 추천 - 질병: {disease}, 피해야할음식: {avoid_foods}")
+    print(f"\n동적 음식 추천 - 질병: {disease}")
+    print(f"피해야할음식: {avoid_foods}")
+    print(f"영양기준: {nutrition_standards[:200]}...")
     
-    # 질병별 맞춤 MySQL 검색
     try:
-        condition_foods = pd.DataFrame()
-        disease_lower = disease.lower()
+        # 1. 영양 기준에서 수치 조건 추출 (새로운 동적 방식)
+        criteria = extract_nutrition_criteria_from_standards(nutrition_standards, disease)
         
-        if '당뇨' in disease or 'diabetes' in disease_lower:
-            condition_foods = search_foods_by_condition('diabetic_friendly')
-        elif '고혈압' in disease or 'hypertension' in disease_lower:
-            condition_foods = search_foods_by_condition('low_sodium', max_sodium=150)
-        elif '고지혈증' in disease or 'hyperlipidemia' in disease_lower:
-            condition_foods = search_foods_by_condition('low_fat', max_fat=3)
+        if not criteria:
+            print("추출된 영양 조건이 없어서 기본 건강식 조건을 사용합니다.")
+            # 기본 조건으로 대체
+            condition_foods = search_foods_by_condition('healthy_default')
         else:
-            # 일반적인 건강식 조건
-            condition_foods = search_foods_by_condition('high_protein', min_protein=8)
+            # 2. 동적 조건으로 음식 검색
+            condition_foods = search_foods_by_dynamic_condition(criteria)
         
         if condition_foods.empty:
             # Vector DB 검색으로 대체
-            health_query = f"{disease} 건강식 저염분 고단백"
+            health_query = f"{disease} 건강식 추천 음식"
             docs = retriever_nutrition.get_relevant_documents(health_query)
             context = "\n".join([doc.page_content for doc in docs])
         else:
             # MySQL 결과를 텍스트로 변환
-            context = f"질병: {disease}\n피해야 할 음식: {avoid_foods}\n영양 기준: {nutrition_standards}\n\n"
+            context = f"질병: {disease}\n피해야 할 음식: {avoid_foods}\n영양 기준: {nutrition_standards}\n"
+            context += f"적용된 영양 조건: {criteria}\n\n"
             context += "추천 가능한 음식들:\n"
             
-            for _, row in condition_foods.head(10).iterrows():
-                food_info = f"음식이름: {row['name']} | "
-                food_info += f"에너지: {row['energy_kcal']:.1f}kcal | "
+            for idx, row in condition_foods.head(100).iterrows():
+                food_info = f"{idx+1}. {row['name']} | "
+                food_info += f"칼로리: {row['energy_kcal']:.1f}kcal | "
                 food_info += f"단백질: {row['protein_g']:.1f}g | "
                 food_info += f"지방: {row['fat_g']:.1f}g | "
                 food_info += f"탄수화물: {row['carbohydrate_g']:.1f}g | "
                 food_info += f"나트륨: {int(row['sodium_mg'])}mg"
+                
+                # 추가 영양소 정보
+                if pd.notna(row['sugar_g']):
+                    food_info += f" | 당류: {row['sugar_g']:.1f}g"
+                if pd.notna(row['cholesterol_mg']):
+                    food_info += f" | 콜레스테롤: {int(row['cholesterol_mg'])}mg"
+                if pd.notna(row['dietary_fiber_g']):
+                    food_info += f" | 식이섬유: {row['dietary_fiber_g']:.1f}g"
+                    
                 context += food_info + "\n"
         
-        # 추천 생성
+        # 3. LLM으로 최종 추천 생성
         recommendation_prompt = PromptTemplate(
-            template="""다음 정보를 바탕으로 {disease} 환자에게 적합한 저녁 음식 3가지를 추천하세요.
+            template="""다음 정보를 바탕으로 {disease} 환자에게 적합한 음식을 최대한 많이 추천하세요.
 
 {context}
 
-추천 규칙:
-1. 피해야 할 음식에 포함된 것은 절대 추천하지 마세요
-2. 영양 기준에 맞는 음식만 선택하세요
-3. 각 음식의 구체적인 영양성분을 명시하세요
-4. {disease} 환자에게 왜 좋은지 간단히 설명하세요
-5. 제공된 데이터에 있는 음식만 추천하세요
+**중요한 추천 규칙:**
+1. 위에 제공된 음식 목록에서 영양 조건에 맞는 음식들을 최대한 많이 선택하여 추천하세요 (50개 이상 목표)
+2. 피해야 할 음식: "{avoid_foods}"에 포함된 것은 절대 추천하지 마세요
+3. 적용된 영양 조건을 준수하는 음식만 선택하세요
+4. 각 음식마다 번호를 매기고 다음 형식으로 작성하세요:
+   "번호. 음식명 - 칼로리: XX kcal, 주요영양소 정보 (추천 이유: {disease}에 좋은 이유)"
+5. {disease} 환자에게 왜 좋은지 각 음식마다 간단히 설명하세요
+6. 제공된 데이터에 있는 음식만 추천하세요
+7. 다양한 카테고리의 음식을 포함하세요 (주식, 반찬, 국물요리, 간식 등)
+8. 영양 조건에 특히 잘 맞는 음식들을 우선적으로 추천하세요
 
-추천 음식:""",
-            input_variables=["disease", "context"]
+**목표: 최소 30개 이상, 가능하면 50개 이상의 음식을 추천하세요**
+
+{disease} 환자를 위한 맞춤 추천 음식 목록:""",
+            input_variables=["disease", "context", "avoid_foods"]
         )
         
         from langchain.chains import LLMChain
         recommendation_chain = LLMChain(llm=llm, prompt=recommendation_prompt)
         result = recommendation_chain.run({
             "disease": disease,
-            "context": context
+            "context": context,
+            "avoid_foods": avoid_foods
         })
         
         return result
         
     except Exception as e:
-        print(f"음식 추천 오류: {e}")
+        print(f"동적 음식 추천 오류: {e}")
         return f"추천 중 오류가 발생했습니다: {str(e)}"
-
+    
 # ---------- Tool 목록 ----------
 tools = [
     Tool(
@@ -451,14 +728,14 @@ tools = [
         description="사용자 질문에서 질병명이나 건강 상태를 추출합니다."
     ),
     Tool(
-        name="GetAvoidFoods", 
+        name="GetAvoidFoods",
         func=get_avoid_foods_tool_func,
-        description="특정 질병 환자가 피해야 할 음식 정보를 PDF 문서에서 검색합니다."
+        description="질병별로 *반드시 피해야 할 음식 목록만* 조회합니다."
     ),
     Tool(
         name="GetNutritionStandards",
-        func=get_nutrition_standards_tool_func, 
-        description="특정 질병 환자의 영양 섭취 기준을 PDF 문서에서 검색합니다."
+        func=get_nutrition_standards_tool_func,
+        description="질병별로 *권장 영양 섭취 기준만* 조회합니다."
     ),
     Tool(
         name="RecommendFoods",
@@ -467,99 +744,539 @@ tools = [
     )
 ]
 
+def create_agent_with_tools():
+    """Tool들을 사용하는 Agent 생성"""
+    agent = initialize_agent(
+        tools=tools,
+        llm=llm,
+        agent=AgentType.ZERO_SHOT_REACT_DESCRIPTION,
+        verbose=True,
+        max_iterations=10,
+        early_stopping_method="generate",
+        handle_parsing_errors=True
+    )
+    return agent
+
+# Agent 인스턴스 생성
+diet_agent = create_agent_with_tools()
+
+# ---------- LangGraph Node 함수들 ----------
+def extract_disease_node(state: DietRecommendationState) -> DietRecommendationState:
+    """질병 추출 노드 - Tool 함수 직접 호출"""
+    try:
+        question = state["question"]
+        print(f"질병 추출 단계: {question}")
+        result = extract_disease_tool_func(question)
+        diseases = [d.strip() for d in result.split(",") if d.strip()]
+        
+        return {
+            **state,
+            "diseases": diseases,
+            "current_step": "extract_disease",
+            "completed_steps": ["extract_disease"],
+            "agent_logs": [f"질병 추출 완료: {diseases}"]
+        }
+    except Exception as e:
+        return {
+            **state,
+            "error": f"질병 추출 오류: {str(e)}",
+            "current_step": "error"
+        }
+
+def get_avoid_foods_node(state: DietRecommendationState) -> DietRecommendationState:
+    """피해야 할 음식 조회 노드 - Tool 함수 직접 호출"""
+    try:
+        diseases = state.get("diseases", [])
+        if not diseases:
+            return {
+                **state,
+                "error": "추출된 질병이 없습니다.",
+                "current_step": "error"
+            }
+        
+        avoid_foods_results = []
+        prev_logs = state.get("agent_logs", [])
+        prev_completed = state.get("completed_steps", [])
+        
+        for disease in diseases:
+            print(f"피해야 할 음식 조회: {disease}")
+            result = get_avoid_foods_tool_func(disease)
+            avoid_foods_results.append(result)
+        
+        avoid_foods = "\n\n".join(avoid_foods_results)
+        
+        new_logs = prev_logs + [f"피해야 할 음식 조회 완료: {', '.join(diseases)}"]
+        new_completed = prev_completed + ["get_avoid_foods"]
+        
+        return {
+            **state,
+            "avoid_foods": avoid_foods,
+            "current_step": "get_avoid_foods",
+            "completed_steps": new_completed,
+            "agent_logs": new_logs
+        }
+    except Exception as e:
+        return {
+            **state,
+            "error": f"피해야 할 음식 조회 오류: {str(e)}",
+            "current_step": "error"
+        }
+
+def get_nutrition_standards_node(state: DietRecommendationState) -> DietRecommendationState:
+    """영양 기준 조회 노드 - Tool 함수 직접 호출 사용"""
+    try:
+        diseases = state.get("diseases", [])
+        if not diseases:
+            return {
+                **state,
+                "error": "추출된 질병이 없습니다.",
+                "current_step": "error"
+            }
+        
+        nutrition_results = []
+        prev_logs = state.get("agent_logs", [])
+        prev_completed = state.get("completed_steps", [])
+        
+        for disease in diseases:
+            print(f"영양 기준 조회: {disease}")
+            result = get_nutrition_standards_tool_func(disease)
+            nutrition_results.append(result)
+        
+        nutrition_standards = "\n\n".join(nutrition_results)
+        
+        new_logs = prev_logs + [f"영양 기준 조회 완료: {', '.join(diseases)}"]
+        new_completed = prev_completed + ["get_nutrition_standards"]
+        
+        return {
+            **state,
+            "nutrition_standards": nutrition_standards,
+            "current_step": "get_nutrition_standards",
+            "completed_steps": new_completed,
+            "agent_logs": new_logs
+        }
+    except Exception as e:
+        return {
+            **state,
+            "error": f"영양 기준 조회 오류: {str(e)}",
+            "current_step": "error"
+        }
+
+def recommend_foods_node(state: DietRecommendationState) -> DietRecommendationState:
+    """음식 추천 노드 - Tool 함수 직접 호출"""
+    try:
+        diseases = state.get("diseases", [])
+        avoid_foods = state.get("avoid_foods", "")
+        nutrition_standards = state.get("nutrition_standards", "")
+        
+        print(f"DEBUG - recommend_foods_node 시작:")
+        print(f"  diseases: {diseases}")
+        print(f"  avoid_foods: {avoid_foods[:100]}...")
+        print(f"  nutrition_standards: {nutrition_standards[:100]}...")
+        
+        if not diseases:
+            return {
+                **state,
+                "error": "추출된 질병이 없습니다.",
+                "current_step": "error"
+            }
+            
+        # 필수 입력 확인
+        if not avoid_foods or not nutrition_standards:
+            return {
+                **state,
+                "error": "피해야 할 음식 또는 영양 기준 정보가 없습니다.",
+                "current_step": "error"
+            }
+        
+        recommended_results = []
+        prev_logs = state.get("agent_logs", [])
+        prev_completed = state.get("completed_steps", [])
+        
+        for disease in diseases:
+            print(f"음식 추천 시작: {disease}")
+            input_str = f"{disease}|{avoid_foods}|{nutrition_standards}"
+            result = recommend_foods_tool_func(input_str)
+            print(f"추천 결과 길이: {len(result)} 글자")
+            print(f"추천 결과 미리보기: {result[:200]}...")
+            recommended_results.append(result)
+        
+        recommended_foods = "\n\n".join(recommended_results)
+        print(f"DEBUG - 최종 recommended_foods 길이: {len(recommended_foods)}")
+
+        new_logs = prev_logs + [f"음식 추천 완료: {', '.join(diseases)}"]
+        new_completed = prev_completed + ["recommend_foods"]
+        
+        updated_state = {
+            **state,
+            "recommended_foods": recommended_foods,
+            "current_step": "recommend_foods",
+            "completed_steps": new_completed,
+            "agent_logs": new_logs
+        }
+        
+        # 상태 저장 확인
+        print(f"DEBUG - 상태 저장 확인:")
+        print(f"  recommended_foods in state: {len(updated_state.get('recommended_foods', ''))}")
+        
+        return updated_state
+        
+    except Exception as e:
+        print(f"음식 추천 오류: {e}")
+        return {
+            **state,
+            "error": f"음식 추천 오류: {str(e)}",
+            "current_step": "error"
+        }
+
+def generate_final_response_node(state: DietRecommendationState) -> DietRecommendationState:
+    """최종 응답 생성 노드 - Tool 함수 직접 호출 (인사말 및 깔끔 섹션 포맷 추가)"""
+    try:
+        diseases = state.get("diseases", [])
+        avoid_foods = state.get("avoid_foods", "").strip()
+        nutrition_standards = state.get("nutrition_standards", "").strip()
+        recommended_foods = state.get("recommended_foods", "").strip()
+
+        # 디버깅 로그 추가
+        print(f"DEBUG - generate_final_response_node:")
+        print(f"  diseases: {diseases}")
+        print(f"  avoid_foods length: {len(avoid_foods)}")
+        print(f"  nutrition_standards length: {len(nutrition_standards)}")
+        print(f"  recommended_foods length: {len(recommended_foods)}")
+        print(f"  recommended_foods preview: {recommended_foods[:200]}...")
+
+        # 0. 인사말
+        greeting = f"안녕하세요! {', '.join(diseases)} 환자님을 위한 식단을 안내해 드립니다.\n"
+
+        # 1. 피해야 할 음식 섹션
+        sections = [greeting]
+        if avoid_foods:
+            sections.append("===== 피해야 할 음식 =====")
+            sections.append(avoid_foods)
+
+        # 2. 영양 섭취 기준 섹션
+        if nutrition_standards:
+            sections.append("\n===== 영양 섭취 기준 =====")
+            sections.append(nutrition_standards)
+
+        # 3. 추천 음식 섹션 - 조건 확인 강화
+        if recommended_foods and len(recommended_foods.strip()) > 0:
+            sections.append("\n===== 추천 음식 =====")
+            sections.append(recommended_foods)
+            print("DEBUG: 추천 음식 섹션이 추가되었습니다.")
+        else:
+            print(f"WARNING: 추천 음식이 비어있습니다. recommended_foods='{recommended_foods}'")
+            # 추천 음식이 없는 경우에도 안내 메시지 추가
+            sections.append("\n===== 추천 음식 =====")
+            sections.append("죄송합니다. 현재 추천할 수 있는 음식 정보를 불러오는 중 문제가 발생했습니다.")
+
+        final_response = "\n".join(sections)
+        print(f"DEBUG: 최종 응답 길이: {len(final_response)}")
+
+        # 상태 누적 (불변성 보장)
+        prev_logs = state.get("agent_logs", [])
+        prev_completed = state.get("completed_steps", [])
+        new_logs = prev_logs + ["최종 응답 생성 완료"]
+        new_completed = prev_completed + ["generate_final_response"]
+
+        return {
+            **state,
+            "final_response": final_response,
+            "current_step": "completed",
+            "completed_steps": new_completed,
+            "agent_logs": new_logs
+        }
+    except Exception as e:
+        print(f"ERROR in generate_final_response_node: {e}")
+        return {
+            **state,
+            "error": f"최종 응답 생성 오류: {e}",
+            "current_step": "error"
+        }
+
+def error_node(state: DietRecommendationState) -> DietRecommendationState:
+    """에러 처리 노드"""
+    error_message = state.get("error", "알 수 없는 오류가 발생했습니다.")
+    return {
+        **state,
+        "final_response": f"죄송합니다. 처리 중 오류가 발생했습니다: {error_message}",
+        "current_step": "error_handled"
+    }
+
+# ---------- 조건부 라우팅 함수 ----------
+def should_continue(state: DietRecommendationState) -> str:
+    """다음 단계 결정 (상태 전달 디버깅 포함)"""
+    current_step = state.get("current_step", "")
+    completed_steps = state.get("completed_steps", [])
+    
+    # 디버깅을 위한 로그
+    print(f"DEBUG: current_step = {current_step}")
+    print(f"DEBUG: completed_steps length = {len(completed_steps)}")
+    print(f"DEBUG: completed_steps = {completed_steps}")
+    
+    # 상태 전달 확인 - 특히 recommended_foods
+    if "recommended_foods" in state:
+        recommended_foods_len = len(str(state["recommended_foods"]))
+        print(f"DEBUG: should_continue에서 recommended_foods 길이 = {recommended_foods_len}")
+        if recommended_foods_len > 0:
+            preview = str(state["recommended_foods"])[:100]
+            print(f"DEBUG: recommended_foods 미리보기 = {preview}...")
+    else:
+        print("DEBUG: recommended_foods 키가 state에 없습니다!")
+    
+    # 전체 state 키 확인
+    print(f"DEBUG: should_continue에서 전체 state 키 = {list(state.keys())}")
+    
+    if current_step == "error":
+        return "error"
+    elif current_step == "extract_disease":
+        return "get_avoid_foods"
+    elif current_step == "get_avoid_foods":
+        return "get_nutrition_standards"
+    elif current_step == "get_nutrition_standards":
+        return "recommend_foods"
+    elif current_step == "recommend_foods":
+        return "generate_final_response"
+    elif current_step == "completed":
+        return END
+    elif current_step == "error_handled":
+        return END
+    else:
+        print(f"WARNING: Unexpected current_step: {current_step}")
+        return "extract_disease"
+
+# ---------- LangGraph 생성 ----------
+def create_diet_recommendation_graph():
+    """식단 추천 그래프 생성"""
+    workflow = StateGraph(DietRecommendationState)
+    
+    # 노드 추가
+    workflow.add_node("extract_disease", extract_disease_node)
+    workflow.add_node("get_avoid_foods", get_avoid_foods_node)
+    workflow.add_node("get_nutrition_standards", get_nutrition_standards_node)
+    workflow.add_node("recommend_foods", recommend_foods_node)
+    workflow.add_node("generate_final_response", generate_final_response_node)
+    workflow.add_node("error", error_node)
+    
+    # 시작점 설정
+    workflow.set_entry_point("extract_disease")
+    
+    # 조건부 엣지 추가
+    workflow.add_conditional_edges(
+        "extract_disease",
+        should_continue,
+        {
+            "get_avoid_foods": "get_avoid_foods",
+            "error": "error"
+        }
+    )
+    
+    workflow.add_conditional_edges(
+        "get_avoid_foods",
+        should_continue,
+        {
+            "get_nutrition_standards": "get_nutrition_standards",
+            "error": "error"
+        }
+    )
+    
+    workflow.add_conditional_edges(
+        "get_nutrition_standards",
+        should_continue,
+        {
+            "recommend_foods": "recommend_foods",
+            "error": "error"
+        }
+    )
+    
+    workflow.add_conditional_edges(
+        "recommend_foods",
+        should_continue,
+        {
+            "generate_final_response": "generate_final_response",
+            "error": "error"
+        }
+    )
+    
+    workflow.add_conditional_edges(
+        "generate_final_response",
+        should_continue,
+        {
+            END: END
+        }
+    )
+    
+    workflow.add_conditional_edges(
+        "error",
+        should_continue,
+        {
+            END: END
+        }
+    )
+    
+    return workflow.compile()
+
+# 전역 그래프 인스턴스 생성
+diet_recommendation_graph = create_diet_recommendation_graph()
+
 # ---------- API 모델 ----------
 class AskRequest(BaseModel):
     question: str
 
 class DebugRequest(BaseModel):
     query: str
-    doc_type: str  # 'pdf' or 'nutrition'
+    doc_type: str  # 'vectordb' or 'nutrition'
 
 @app.get("/")
 def root():
     return {
         "message": "MySQL 연동 RAG 기반 식단 추천 API 서버 실행 중",
-        "pdf_docs": len(pdf_docs) if pdf_docs else 0,
+        "vector_db_api": VECTOR_DB_API_URL,
         "nutrition_docs": len(nutrition_docs) if nutrition_docs else 0,
         "mysql_connection": "연결됨" if engine else "연결 안됨"
     }
+    
+            
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8001)
 
-@app.get("/test-mysql")
-def test_mysql():
-    """MySQL 연결 테스트"""
-    try:
-        with engine.connect() as conn:
-            result = conn.execute(text("SELECT COUNT(*) as count FROM food_nutritional_ingredients"))
-            count = result.fetchone()[0]
-            return {"status": "success", "total_foods": count}
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
-
-@app.post("/debug")
-def debug_search(request: DebugRequest):
-    """문서 검색 디버깅용 엔드포인트"""
-    try:
-        if request.doc_type == 'pdf' and retriever_pdf:
-            docs = retriever_pdf.get_relevant_documents(request.query)
-            return {
-                "query": request.query,
-                "doc_type": request.doc_type,
-                "found_docs": len(docs),
-                "content": [doc.page_content[:500] for doc in docs]
-            }
-        elif request.doc_type == 'nutrition' and retriever_nutrition:
-            docs = retriever_nutrition.get_relevant_documents(request.query)
-            return {
-                "query": request.query,
-                "doc_type": request.doc_type, 
-                "found_docs": len(docs),
-                "content": [doc.page_content[:200] for doc in docs]
-            }
-        else:
-            return {"error": f"{request.doc_type} 문서가 로드되지 않았습니다."}
-    except Exception as e:
-        return {"error": str(e)}
 
 @app.post("/ask")
 def ask(request: AskRequest):
     try:
         print(f"받은 질문: {request.question}")
         
-        # Agent 초기화
-        agent = initialize_agent(
-            tools=tools,
-            llm=llm,
-            agent=AgentType.ZERO_SHOT_REACT_DESCRIPTION,
-            verbose=True,
-            max_iterations=5,
-            early_stopping_method="generate",
-            handle_parsing_errors=True
-        )
+        # LangGraph 사용
+        initial_state = {
+            "question": request.question,
+            "diseases": [],
+            "avoid_foods": "",
+            "nutrition_standards": "",
+            "recommended_foods": "",
+            "final_response": "",
+            "current_step": "extract_disease",
+            "completed_steps": [],
+            "error": None,
+            "agent_logs": []
+        }
+        
+        final_state = diet_recommendation_graph.invoke(initial_state)
+        
+        return {
+            "response": final_state.get("final_response", "응답 생성에 실패했습니다."),
+            "status": "success" if not final_state.get("error") else "error",
+            "question": request.question
+        }
+        
+    except Exception as e:
+        error_msg = str(e)
+        print(f"에러 발생: {error_msg}")
+        
+        return {
+            "error": "일시적인 오류가 발생했습니다. 잠시 후 다시 시도해주세요.",
+            "status": "error",
+            "question": request.question,
+            "debug_error": error_msg
+        }
+        
+@app.post("/ask-langgraph")
+def ask_langgraph(request: AskRequest):
+    """LangGraph + Agent를 사용한 식단 추천"""
+    try:
+        print(f"LangGraph 방식 - 받은 질문: {request.question}")
+        
+        # 초기 상태 설정
+        initial_state = {
+            "question": request.question,
+            "diseases": [],
+            "avoid_foods": "",
+            "nutrition_standards": "",
+            "recommended_foods": "",
+            "final_response": "",
+            "current_step": "extract_disease",
+            "completed_steps": [],
+            "error": None,
+            "agent_logs": []
+        }
+        
+        # LangGraph 실행
+        final_state = diet_recommendation_graph.invoke(initial_state)
+        
+        return {
+            "response": final_state.get("final_response", "응답 생성에 실패했습니다."),
+            "status": "success" if not final_state.get("error") else "error",
+            "question": request.question,
+            "debug_info": {
+                "diseases": final_state.get("diseases", []),
+                "completed_steps": final_state.get("completed_steps", []),
+                "agent_logs": final_state.get("agent_logs", []),
+                "current_step": final_state.get("current_step", "unknown")
+            }
+        }
+        
+    except Exception as e:
+        error_msg = str(e)
+        print(f"LangGraph 에러 발생: {error_msg}")
+        
+        return {
+            "error": "일시적인 오류가 발생했습니다. 잠시 후 다시 시도해주세요.",
+            "status": "error",
+            "question": request.question,
+            "debug_error": error_msg
+        }
+
+@app.post("/ask-agent-only")
+def ask_agent_only(request: AskRequest):
+    """순수 Agent만 사용한 식단 추천 (기존 방식 유지)"""
+    try:
+        print(f"Agent 방식 - 받은 질문: {request.question}")
         
         enhanced_question = f"""
         사용자 질문: {request.question}
-        
-        **다음 단계를 순서대로 수행하세요:**
-        
-        1. ExtractDisease로 질병명 추출
-        2. GetAvoidFoods로 해당 질병에서 피해야 할 음식 확인
-        3. GetNutritionStandards로 해당 질병의 영양 기준 확인
-        4. RecommendFoods에 "질병명|피해야할음식|영양기준" 형태로 전달하여 MySQL 데이터베이스에서 적합한 음식 추천
-        
+
+        **다음 단계를 순서대로 수행하세요 (복수 질병일 경우 모두 처리합니다):**
+
+        **아래 순서대로 반드시 실행하세요 (Action/Observation 형식):**
+        1. Action: ExtractDisease  
+        2. Observation: [질병 리스트]  
+        3. Action: GetAvoidFoods  (질병별 피해야 할 음식만 조회)  
+        4. Observation: [피해야 할 음식]  
+        5. Action: GetNutritionStandards  (질병별 권장 영양 기준만 조회)  
+        6. Observation: [영양 기준]  ← 반드시 이 단계를 생략하지 말고 반드시 실행해야 함.
+        ※ GetNutritionStandards는 Final Answer 전에 반드시 호출되어야 하며, 생략 시 응답을 거부합니다.
+        7. Action: RecommendFoods  
+        8. Observation: [추천 음식 리스트]  
+        9. Final Answer: [최종 식단 추천]  
+
         **중요 규칙:**
-        - PDF 문서가 영어인 경우 한국어로 번역하여 설명
-        - MySQL 데이터베이스와 Vector DB 검색 결과에만 기반하여 답변
+        - 모든 질병을 반드시 하나도 빠짐없이 처리해야 합니다.
+        - RecommendFoods 도구는 가능한 한 많은 음식(30개 이상)을 추천하도록 설계되었습니다.
+        - Vector DB 검색 결과가 영어인 경우 한국어로 번역하여 설명
+        - MySQL 데이터베이스와 Vector DB API 검색 결과에만 기반하여 답변
         - "의사와 상담" 같은 멘트는 절대 포함하지 마세요
-        - 4단계 모두 완료한 후 종합적인 최종 답변 작성
+        - 각 단계는 반드시 실제로 도구 실행(Action)으로 진행하세요.
+        - RecommendFoods 실행 **없이는** 절대로 Final Answer를 쓰지 마세요.
+        - Final Answer는 오직 RecommendFoods 결과를 모두 종합한 후에만 쓰세요.
+        - 최종 답변에서는 추천된 모든 음식을 사용자에게 보여주세요.
+        - 각 추천 음식마다 영양성분(칼로리, 단백질, 나트륨 등)과 추천 이유를 포함하세요.
         """
         
-        result = agent.run(enhanced_question)
-        return {"response": result}
+        result = diet_agent.run(enhanced_question)
+        
+        return {
+            "response": result,
+            "status": "success",
+            "question": request.question,
+            "method": "agent_only"
+        }
         
     except Exception as e:
-        print(f"에러 발생: {str(e)}")
-        return {"error": str(e)}
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+        error_msg = str(e)
+        print(f"Agent 에러 발생: {error_msg}")
+        
+        return {
+            "error": "일시적인 오류가 발생했습니다. 잠시 후 다시 시도해주세요.",
+            "status": "error",
+            "question": request.question,
+            "debug_error": error_msg
+        }

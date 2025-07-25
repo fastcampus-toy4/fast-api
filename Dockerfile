@@ -1,20 +1,8 @@
+FROM youruser/my-fastapi-app-deps:latest
 
-# 1) 베이스 이미지
-FROM python:3.10-slim
-
-
-RUN pip config set global.index-url https://mirror.kakao.com/pypi/simple
-
-
-# 2) 작업 디렉토리
 WORKDIR /app
 
-# 3) 의존성 복사 및 설치
-COPY requirements.txt .
-RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install --no-cache-dir -r requirements.txt
-# 4) 소스 복사
+# 의존성은 이미 베이스 이미지에 있으니, 코드만 복사
 COPY . .
 
-# 5) 컨테이너 시작 명령
-CMD ["uvicorn", "langchaintest:app", "--host", "0.0.0.0", "--port", "9000"]
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "9000"]

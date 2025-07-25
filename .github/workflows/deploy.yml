@@ -18,25 +18,49 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v3
 
+
+      # 2) pip 캐시
+      - name: Cache pip
+        uses: actions/cache@v3
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
       # 2) Docker Buildx 설치
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      - name: Build & push Docker image (with registry cache)
+        uses: docker/build-push-action@v3
+        with:
+          context: .
+          push: true
+          tags: ${{ env.IMAGE_NAME }}
+          cache-from: type=registry,ref=${{ env.IMAGE_NAME }}
+          cache-to:   type=registry,ref=${{ env.IMAGE_NAME }},mode=max
+
+
       # 3) Docker 이미지 빌드
-      - name: Build Docker image
-        run: |
-          docker build -t "$IMAGE_NAME" .
+#      - name: Build Docker image
+ #       run: |
+  #        docker build -t "$IMAGE_NAME" .
 
       # 4) DockerHub 로그인
-      - name: Login to DockerHub
-        run: |
-          echo "${{ secrets.DOCKER_PASSWORD }}" \
-            | docker login -u "${{ secrets.DOCKER_USERNAME }}" --password-stdin
+   #   - name: Login to DockerHub
+    #    run: |
+     #     echo "${{ secrets.DOCKER_PASSWORD }}" \
+      #      | docker login -u "${{ secrets.DOCKER_USERNAME }}" --password-stdin
 
       # 5) 이미지 푸시
-      - name: Push Docker image
-        run: |
-          docker push "$IMAGE_NAME"
+     # - name: Push Docker image
+      #  run: |
+       #   docker push "$IMAGE_NAME"
+
+
+
+
 
       # 6) 원격 서버에 SSH 배포
       - name: Deploy to Server via SSH

@@ -1,13 +1,15 @@
+RUN pip config set global.index-url https://mirror.kakao.com/pypi/simple
+
 # 1) 베이스 이미지
-FROM python:3.11-slim
+FROM python:3.10-slim
 
 # 2) 작업 디렉토리
 WORKDIR /app
 
 # 3) 의존성 복사 및 설치
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --no-cache-dir -r requirements.txt
 # 4) 소스 복사
 COPY . .
 

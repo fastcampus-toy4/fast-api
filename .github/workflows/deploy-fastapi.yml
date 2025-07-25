@@ -5,9 +5,8 @@ on:
     branches: [ main ]
 
 env:
-  # 베이스 이미지(의존성 포함)와 앱 최종 이미지
-  BASE_IMAGE: jaeleedong/my-fastapi-app-deps:latest
-  APP_IMAGE:  jaeleedong/my-fastapi-app:latest
+  BASE_IMAGE: ${{ secrets.DOCKER_USERNAME }}/my-fastapi-app-deps:latest
+  APP_IMAGE:  ${{ secrets.DOCKER_USERNAME }}/my-fastapi-app:latest
 
 jobs:
   build-and-deploy:

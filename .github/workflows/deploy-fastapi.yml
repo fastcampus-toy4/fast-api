@@ -30,7 +30,7 @@ jobs:
         uses: docker/build-push-action@v3
         with:
           context: .
-          file: fastapi/Dockerfile
+          file: ./fastapi/Dockerfile
           push: true
           tags: ${{ env.APP_IMAGE }}
           cache-from: type=registry,ref=${{ env.APP_IMAGE }}

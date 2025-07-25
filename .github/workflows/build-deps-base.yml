@@ -9,7 +9,7 @@ on:
 
 env:
   BASE_IMAGE: ${{ secrets.DOCKER_USERNAME }}/my-fastapi-app-deps:latest
-   APP_IMAGE:  ${{ secrets.DOCKER_USERNAME }}/my-fastapi-app:latest
+  APP_IMAGE:  ${{ secrets.DOCKER_USERNAME }}/my-fastapi-app:latest
 jobs:
   build-deps:
     runs-on: ubuntu-latest
@@ -30,8 +30,8 @@ jobs:
       - name: Build & push base image (pip deps)
         uses: docker/build-push-action@v3
         with:
-          context: .
-          file: ./Dockerfile.deps
+          context: ./fastapi
+          file: ./fastapi/Dockerfile.deps
           push: true
           tags: ${{ env.BASE_IMAGE }}
           cache-from: type=registry,ref=${{ env.BASE_IMAGE }}

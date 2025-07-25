@@ -1,7 +1,10 @@
-RUN pip config set global.index-url https://mirror.kakao.com/pypi/simple
 
 # 1) 베이스 이미지
 FROM python:3.10-slim
+
+
+RUN pip config set global.index-url https://mirror.kakao.com/pypi/simple
+
 
 # 2) 작업 디렉토리
 WORKDIR /app

@@ -36,9 +36,11 @@ jobs:
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           port: 22
           script: |
-            docker pull $IMAGE_NAME
-            docker stop $CONTAINER_NAME || true
-            docker rm $CONTAINER_NAME || true
-            docker run -d --name $CONTAINER_NAME -p 9000:9000 \
-              --env-file /home/ubuntu/project/fastapi/.env \
-              $IMAGE_NAME
+             # GitHub Actions가 미리 치환합니다
+            docker pull ${{ env.IMAGE_NAME }}
+            docker stop ${{ env.CONTAINER_NAME }} || true
+            docker rm   ${{ env.CONTAINER_NAME }} || true
+            docker run -d --name ${{ env.CONTAINER_NAME }} -p 9000:9000 \
+              --env-file /home/${{ secrets.SERVER_USER }}/project/fastapi/.env \
+              ${{ env.IMAGE_NAME }}
+

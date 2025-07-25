@@ -8,8 +8,8 @@ on:
   workflow_dispatch:
 
 env:
-  BASE_IMAGE: ${{ secrets.DOCKER_USERNAME }}/my-fastapi-app-deps:latest
-  APP_IMAGE:  ${{ secrets.DOCKER_USERNAME }}/my-fastapi-app:latest
+  BASE_IMAGE: jaeleedong/my-fastapi-app-deps:latest
+
 jobs:
   build-deps:
     runs-on: ubuntu-latest

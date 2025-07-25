@@ -30,8 +30,8 @@ jobs:
       - name: Build & push base image (pip deps)
         uses: docker/build-push-action@v3
         with:
-          context: ./fastapi
-          file: fastapi/Dockerfile.deps
+          context: .
+          file: ./Dockerfile.deps
           push: true
           tags: ${{ env.BASE_IMAGE }}
           cache-from: type=registry,ref=${{ env.BASE_IMAGE }}

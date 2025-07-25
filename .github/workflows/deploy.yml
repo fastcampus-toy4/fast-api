@@ -6,7 +6,6 @@ on:
     branches: [ main ]
 
 env:
-  # DockerHub 리포지터리/태그
   IMAGE_NAME: ${{ secrets.DOCKER_USERNAME }}/my-fastapi-app:latest
 
 jobs:
@@ -18,8 +17,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v3
 
-
-      # 2) pip 캐시
+      # 2) pip 캐시 (이미 설치된 패키지 재사용)
       - name: Cache pip
         uses: actions/cache@v3
         with:
@@ -28,42 +26,35 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-pip-
 
-      # 2) Docker Buildx 설치
+      # 3) buildx 캐시 디렉터리 복원
+      - name: Restore Docker buildx cache
+        uses: actions/cache@v3
+        with:
+          path: .buildx-cache
+          key: ${{ runner.os }}-buildx-${{ hashFiles('Dockerfile','**/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-buildx-
+
+      # 4) Docker Buildx 설정
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build & push Docker image (with registry cache)
+      # 5) 이미지 빌드 & 푸시 (로컬 + 레지스트리 캐시)
+      - name: Build & push Docker image
         uses: docker/build-push-action@v3
         with:
           context: .
           push: true
           tags: ${{ env.IMAGE_NAME }}
-          cache-from: type=registry,ref=${{ env.IMAGE_NAME }}
-          cache-to:   type=registry,ref=${{ env.IMAGE_NAME }},mode=max
+          cache-from:
+            - type=local,src=.buildx-cache
+            - type=registry,ref=${{ env.IMAGE_NAME }}
+          cache-to:
+            - type=local,dest=.buildx-cache,mode=max
+            - type=registry,ref=${{ env.IMAGE_NAME }},mode=max
 
-
-      # 3) Docker 이미지 빌드
-#      - name: Build Docker image
- #       run: |
-  #        docker build -t "$IMAGE_NAME" .
-
-      # 4) DockerHub 로그인
-   #   - name: Login to DockerHub
-    #    run: |
-     #     echo "${{ secrets.DOCKER_PASSWORD }}" \
-      #      | docker login -u "${{ secrets.DOCKER_USERNAME }}" --password-stdin
-
-      # 5) 이미지 푸시
-     # - name: Push Docker image
-      #  run: |
-       #   docker push "$IMAGE_NAME"
-
-
-
-
-
-      # 6) 원격 서버에 SSH 배포
-      - name: Deploy to Server via SSH
+      # 6) 원격 서버 배포
+      - name: Deploy to server via SSH
         uses: appleboy/ssh-action@v1.0.0
         with:
           host:     ${{ secrets.SERVER_IP }}
@@ -71,17 +62,12 @@ jobs:
           key:      ${{ secrets.SSH_PRIVATE_KEY }}
           port:     22
           script: |
-            # DockerHub 로그인 (서버 측)
             echo "${{ secrets.DOCKER_PASSWORD }}" \
               | sudo docker login -u "${{ secrets.DOCKER_USERNAME }}" --password-stdin
 
-            # 기존 컨테이너 강제 삭제
             sudo docker rm -f fastapi-app || true
 
-            # 최신 이미지 내려받기
             sudo docker pull ${{ env.IMAGE_NAME }}
-
-            # 새 컨테이너 실행
             sudo docker run -d \
               --name fastapi-app \
               -p 9000:9000 \

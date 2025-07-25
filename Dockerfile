@@ -1,4 +1,4 @@
-FROM youruser/my-fastapi-app-deps:latest
+FROM jaeleedong/my-fastapi-app-deps:latest
 
 WORKDIR /app
 

@@ -9,7 +9,7 @@ on:
 
 env:
   BASE_IMAGE: ${{ secrets.DOCKER_USERNAME }}/my-fastapi-app-deps:latest
-
+   APP_IMAGE:  ${{ secrets.DOCKER_USERNAME }}/my-fastapi-app:latest
 jobs:
   build-deps:
     runs-on: ubuntu-latest

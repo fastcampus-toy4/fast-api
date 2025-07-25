@@ -2,6 +2,7 @@ import pandas as pd
 import os
 import re
 import time
+import json
 import pymysql
 import shutil
 import requests
@@ -53,13 +54,11 @@ VECTOR_DB_API_URL = "http://155.248.175.96:8000"
 TARGET_COLLECTION_NAME = "disease_data"
 
 # ChromaDB 클라이언트 초기화
-chroma_client = None
 try:
     chroma_client = chromadb.HttpClient(host="155.248.175.96", port=8000)
     print("ChromaDB HttpClient 성공적으로 초기화됨.")
 except Exception as e:
     print(f"ChromaDB HttpClient 초기화 오류: {e}")
-    chroma_client = None
     
 # ---------- API 모델 ----------
 class AskRequest(BaseModel):
@@ -77,8 +76,8 @@ class AvoidFood(BaseModel):
 # 추천 음식 모델  
 class RecommendedFood(BaseModel):
     name: str
-    calories_kcal: float
-    sodium_mg: int
+    # calories_kcal: float
+    # sodium_mg: int
     reason: str
 
 # 응답 모델 수정
@@ -287,10 +286,6 @@ JSON 형태로만 출력:"""
         }).strip()
         
         print(f"\n추출된 영양 조건 (raw): {result}")
-        
-        # JSON 파싱 시도 - 더 robust하게 개선
-        import json
-        import re
         
         # 1. JSON 블록 추출 (```json이나 ``` 태그 제거)
         cleaned_result = re.sub(r'```json\s*', '', result)
@@ -646,8 +641,7 @@ def get_nutrition_standards_tool_func(disease: str) -> str:
 
 def recommend_foods_tool_func(input_str: str) -> str:
     """
-    개선된 음식 추천 함수 - 동적 조건 생성 사용
-    *** 하드코딩된 질병별 분기 완전 제거 ***
+    동적 조건 생성 사용
     """
     if not retriever_nutrition:
         return "영양 데이터가 없어 음식을 추천할 수 없습니다."
@@ -1008,8 +1002,8 @@ def parse_recommended_foods(recommended_foods_text: str) -> List[RecommendedFood
                 
                 recommended_foods.append(RecommendedFood(
                     name=name,
-                    calories_kcal=calories,
-                    sodium_mg=sodium,
+                    # calories_kcal=calories,
+                    # sodium_mg=sodium,
                     reason=reason
                 ))
                 
@@ -1114,6 +1108,14 @@ def should_continue(state: DietRecommendationState) -> str:
     
     # 전체 state 키 확인
     print(f"DEBUG: should_continue에서 전체 state 키 = {list(state.keys())}")
+    print("retriever_nutrition:", retriever_nutrition)
+    print("type:", type(retriever_nutrition))
+    print("retriever_nutrition vectorstore:", type(retriever_nutrition.vectorstore))
+    print("retriever_nutrition vectorstore base:", retriever_nutrition.vectorstore._collection if hasattr(retriever_nutrition.vectorstore, '_collection') else 'N/A')
+    if isinstance(retriever_nutrition.vectorstore, Chroma):
+        print("❗️로컬 Chroma Vector DB 사용 중!")
+    else:
+        print("✅ HTTP Chroma DB 사용 중!")
     
     if current_step == "error":
         return "error"

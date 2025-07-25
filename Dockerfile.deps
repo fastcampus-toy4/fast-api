@@ -1,0 +1,13 @@
+# syntax=docker/dockerfile:1.4
+FROM python:3.10-slim
+
+WORKDIR /app
+
+# PyPI 미러 설정 (선택)
+RUN pip config set global.index-url https://mirror.kakao.com/pypi/simple
+
+COPY requirements.txt .
+
+# BuildKit pip 캐시 사용
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --no-cache-dir -r requirements.txt

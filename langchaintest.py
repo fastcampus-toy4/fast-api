@@ -13,6 +13,7 @@ from sqlalchemy import create_engine, text
 from urllib.parse import quote_plus
 from typing import TypedDict, Optional, List
 
+from chromadb import HttpClient
 from fastapi import FastAPI
 from pydantic import BaseModel
 from langchain.chat_models import ChatOpenAI
@@ -20,6 +21,7 @@ from langchain_community.document_loaders import DirectoryLoader, PyPDFLoader
 from langchain.text_splitter import CharacterTextSplitter
 from langchain.embeddings import OpenAIEmbeddings
 from langchain.vectorstores import Chroma
+from langchain_community.embeddings import SentenceTransformerEmbeddings
 from langchain.prompts import PromptTemplate
 from langchain.chains import RetrievalQA
 from langchain.agents import Tool, initialize_agent
@@ -54,12 +56,46 @@ VECTOR_DB_API_URL = "http://155.248.175.96:8000"
 TARGET_COLLECTION_NAME = "disease_data"
 
 # ChromaDB 클라이언트 초기화
-try:
-    chroma_client = chromadb.HttpClient(host="155.248.175.96", port=8000)
-    print("ChromaDB HttpClient 성공적으로 초기화됨.")
-except Exception as e:
-    print(f"ChromaDB HttpClient 초기화 오류: {e}")
+
+chroma_client = HttpClient(
+    host="155.248.175.96",
+    port=8000
+)
+print("✅ ChromaDB HttpClient 성공적으로 초기화됨.")
+
+# 2) 임베딩 함수 정의
+embedding = SentenceTransformerEmbeddings(model_name="all-MiniLM-L6-v2")
+
+# 3) LangChain Chroma 인스턴스 생성 (HTTP 모드)
+embedding = OpenAIEmbeddings()
+vectordb = Chroma(
+    client=chroma_client,
+    collection_name=TARGET_COLLECTION_NAME,
+    embedding_function=embedding
+)
+# 4) Retriever 초기화
+retriever_nutrition = vectordb.as_retriever(search_kwargs={"k": 5})
+print("✅ Retriever 준비 완료:", retriever_nutrition)
+
+
+# try:
+#     chroma_client = chromadb.HttpClient(host="155.248.175.96", port=8000)
+#     print("ChromaDB HttpClient 성공적으로 초기화됨.")
+# except Exception as e:
+#     print(f"ChromaDB HttpClient 초기화 오류: {e}")
     
+# --------------------연결 테스트
+import requests
+try:
+    r = requests.get("http://155.248.175.96:8000/api/v2/heartbeat")
+    if r.status_code == 200:
+        print("✅ 서버 연결 정상:", r.json())
+    else:
+        print("⚠️ 연결 실패:", r.status_code)
+except Exception as e:
+    print("❌ 서버 연결 오류:", e)
+
+
 # ---------- API 모델 ----------
 class AskRequest(BaseModel):
     question: str
@@ -419,81 +455,97 @@ if nutrition_docs:
     print(f"분할된 영양정보 청크: {len(nutrition_docs)}개")
 
 # ---------- 벡터 DB (기존 벡터DB가 있으면 재사용, 없으면 생성) ----------
-embedding = OpenAIEmbeddings()
-vectordb_nutrition = None
-retriever_nutrition = None
+# embedding = OpenAIEmbeddings()
+# vectordb_nutrition = None
+# retriever_nutrition = vectordb_nutrition.as_retriever(search_kwargs={"k": 15})
 
-vector_db_path = "./vector_db_nutrition"
+# retriever_nutrition = None
 
-# 기존 벡터 DB 확인
-if os.path.exists(vector_db_path) and os.listdir(vector_db_path):
-    try:
-        print("기존 벡터 DB 로딩 중...")
-        vectordb_nutrition = Chroma(persist_directory=vector_db_path, embedding_function=embedding)
-        retriever_nutrition = vectordb_nutrition.as_retriever(search_kwargs={"k": 15})
-        print("기존 벡터 DB 로딩 완료")
-    except Exception as e:
-        print(f"기존 벡터 DB 로딩 실패: {e}")
-        print("새로운 벡터 DB 생성을 진행합니다.")
-        if os.path.exists(vector_db_path):
-            shutil.rmtree(vector_db_path)
 
-# 벡터 DB가 없거나 로딩 실패한 경우 새로 생성
-if vectordb_nutrition is None and nutrition_docs:
-    print("새로운 벡터 DB 생성 중...")
-    try:
-        # 배치로 나누어 처리
-        batch_size = 20  # 더 작은 배치 사이즈
-        total_batches = (len(nutrition_docs) - 1) // batch_size + 1
+# vector_db_path = "./vector_db_nutrition"
+
+
+
+
+# # 기존 벡터 DB 확인
+# if os.path.exists(vector_db_path) and os.listdir(vector_db_path):
+
+# # ----------------- 경로 테스트--------------------------------------
+#     vector_db_path = "./vector_db_nutrition"
+#     print("현재 작업 디렉토리:", os.getcwd())
+#     print("vector_db_path 경로 절대값:", os.path.abspath(vector_db_path))
+
+#     print("경로 존재 여부:", os.path.exists(vector_db_path))  # True
+#     print("디렉토리 내용물:", os.listdir(vector_db_path))  # 보기
+
+
+# try:
+        # print("기존 벡터 DB 로딩 중...")
+        # vectordb_nutrition = Chroma(persist_directory=vector_db_path, embedding_function=embedding)
+        # print("dddddddddddddddddddddddd")
+        # print("기존 벡터 DB 로딩 완료")
+# except Exception as e:
+#     print(f"기존 벡터 DB 로딩 실패: {e}")
+#     print("새로운 벡터 DB 생성을 진행합니다.")
+        # if os.path.exists(vector_db_path):
+        #     shutil.rmtree(vector_db_path)
+
+# # 벡터 DB가 없거나 로딩 실패한 경우 새로 생성
+# if vectordb_nutrition is None and nutrition_docs:
+#     print("새로운 벡터 DB 생성 중...")
+#     try:
+#         # 배치로 나누어 처리
+#         batch_size = 20  # 더 작은 배치 사이즈
+#         total_batches = (len(nutrition_docs) - 1) // batch_size + 1
         
-        print(f"총 {len(nutrition_docs)}개 문서를 {total_batches}개 배치로 나누어 처리")
+#         print(f"총 {len(nutrition_docs)}개 문서를 {total_batches}개 배치로 나누어 처리")
         
-        # 첫 번째 배치로 벡터 DB 초기화
-        first_batch = nutrition_docs[:batch_size]
-        vectordb_nutrition = Chroma.from_documents(
-            first_batch, 
-            embedding, 
-            persist_directory=vector_db_path
-        )
-        vectordb_nutrition.persist()
-        print(f"첫 번째 배치 ({len(first_batch)}개) 처리 완료")
+#         # 첫 번째 배치로 벡터 DB 초기화
+#         first_batch = nutrition_docs[:batch_size]
+#         vectordb_nutrition = Chroma.from_documents(
+#             first_batch, 
+#             embedding, 
+#             persist_directory=vector_db_path
+#         )
+#         vectordb_nutrition.persist()
+#         print(f"첫 번째 배치 ({len(first_batch)}개) 처리 완료")
         
-        # 나머지 배치들 순차 처리
-        for i in range(batch_size, len(nutrition_docs), batch_size):
-            batch = nutrition_docs[i:i+batch_size]
-            batch_num = i // batch_size + 1
+#         # 나머지 배치들 순차 처리
+#         for i in range(batch_size, len(nutrition_docs), batch_size):
+#             batch = nutrition_docs[i:i+batch_size]
+#             batch_num = i // batch_size + 1
             
-            print(f"배치 {batch_num}/{total_batches} 처리 중... ({len(batch)}개 문서)")
+#             print(f"배치 {batch_num}/{total_batches} 처리 중... ({len(batch)}개 문서)")
             
-            try:
-                vectordb_nutrition.add_documents(batch)
-                vectordb_nutrition.persist()
+#             try:
+#                 vectordb_nutrition.add_documents(batch)
+#                 vectordb_nutrition.persist()
                 
-                # Rate Limit 방지를 위한 지연
-                if i + batch_size < len(nutrition_docs):
-                    print("Rate Limit 방지를 위해 10초 대기...")
-                    time.sleep(10)
+#                 # Rate Limit 방지를 위한 지연
+#                 if i + batch_size < len(nutrition_docs):
+#                     print("Rate Limit 방지를 위해 10초 대기...")
+#                     time.sleep(10)
                     
-            except Exception as batch_error:
-                print(f"배치 {batch_num} 처리 실패: {batch_error}")
-                if "rate_limit" in str(batch_error).lower():
-                    print("Rate Limit 감지. 30초 대기 후 재시도...")
-                    time.sleep(30)
-                    try:
-                        vectordb_nutrition.add_documents(batch)
-                        vectordb_nutrition.persist()
-                        print(f"배치 {batch_num} 재시도 성공")
-                    except Exception as retry_error:
-                        print(f"배치 {batch_num} 재시도 실패: {retry_error}")
-                        continue
+#             except Exception as batch_error:
+#                 print(f"배치 {batch_num} 처리 실패: {batch_error}")
+#                 if "rate_limit" in str(batch_error).lower():
+#                     print("Rate Limit 감지. 30초 대기 후 재시도...")
+#                     time.sleep(30)
+#                     try:
+#                         vectordb_nutrition.add_documents(batch)
+#                         vectordb_nutrition.persist()
+#                         print(f"배치 {batch_num} 재시도 성공")
+#                     except Exception as retry_error:
+#                         print(f"배치 {batch_num} 재시도 실패: {retry_error}")
+#                         continue
         
-        retriever_nutrition = vectordb_nutrition.as_retriever(search_kwargs={"k": 15})
-        print("새로운 벡터 DB 생성 완료")
+#         retriever_nutrition = vectordb_nutrition.as_retriever(search_kwargs={"k": 15})
+#         print("새로운 벡터 DB 생성 완료")
         
-    except Exception as e:
-        print(f"벡터 DB 생성 실패: {e}")
-        vectordb_nutrition = None
-        retriever_nutrition = None
+#     except Exception as e:
+#         print(f"벡터 DB 생성 실패: {e}")
+#         vectordb_nutrition = None
+#         retriever_nutrition = None
 
 # ---------- LLM 및 Chain 설정 ----------
 llm = ChatOpenAI(model="gpt-3.5-turbo", temperature=0.1, max_tokens=4096)
@@ -1112,10 +1164,12 @@ def should_continue(state: DietRecommendationState) -> str:
     print("type:", type(retriever_nutrition))
     print("retriever_nutrition vectorstore:", type(retriever_nutrition.vectorstore))
     print("retriever_nutrition vectorstore base:", retriever_nutrition.vectorstore._collection if hasattr(retriever_nutrition.vectorstore, '_collection') else 'N/A')
-    if isinstance(retriever_nutrition.vectorstore, Chroma):
-        print("❗️로컬 Chroma Vector DB 사용 중!")
-    else:
-        print("✅ HTTP Chroma DB 사용 중!")
+    
+    # client = vectordb._client
+    # if isinstance(client, HttpClient):
+    #     print("✅ HTTP Chroma Vector DB 사용 중!")
+    # else:
+    #     print(" ❗️로컬 Chroma DB 사용 중!")
     
     if current_step == "error":
         return "error"

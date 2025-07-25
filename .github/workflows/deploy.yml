@@ -43,6 +43,18 @@ jobs:
         run: |
           docker buildx create --use --name mybuilder || true
 
+
+      - name: Login to DockerHub
+        uses: docker/login-action@v2
+        with:
+          registry: docker.io
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+
+
+
+
       # ③ 이미지 빌드 & 푸시 (로컬 + 레지스트리 캐시)
       - name: Build & push Docker image
         uses: docker/build-push-action@v3

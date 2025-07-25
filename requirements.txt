@@ -1,0 +1,12 @@
+sentence-transformers
+pandas
+fastapi
+uvicorn
+python-dotenv
+langchain
+langchain-openai
+langchain-chroma
+chromadb
+langchain-community
+pymysql
+langgraph

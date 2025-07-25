@@ -31,16 +31,17 @@ jobs:
       - name: Deploy to server via SSH
         uses: appleboy/ssh-action@v1.0.0
         with:
-          host: ${{ secrets.SERVER_IP }}
+          host:     ${{ secrets.SERVER_IP }}
           username: ${{ secrets.SERVER_USER }}
-          key: ${{ secrets.SSH_PRIVATE_KEY }}
-          port: 22
+          key:      ${{ secrets.SSH_PRIVATE_KEY }}
+          port:     22
+          envs: |
+            IMAGE_NAME=${{ secrets.DOCKER_USERNAME }}/my-fastapi-app:latest
+            CONTAINER_NAME=fastapi-app
           script: |
-             # GitHub Actions가 미리 치환합니다
-            docker pull ${{ env.IMAGE_NAME }}
-            docker stop ${{ env.CONTAINER_NAME }} || true
-            docker rm   ${{ env.CONTAINER_NAME }} || true
-            docker run -d --name ${{ env.CONTAINER_NAME }} -p 9000:9000 \
+            docker pull $IMAGE_NAME
+            docker stop $CONTAINER_NAME || true
+            docker rm   $CONTAINER_NAME || true
+            docker run -d --name $CONTAINER_NAME -p 9000:9000 \
               --env-file /home/${{ secrets.SERVER_USER }}/project/fastapi/.env \
-              ${{ env.IMAGE_NAME }}
-
+              $IMAGE_NAME

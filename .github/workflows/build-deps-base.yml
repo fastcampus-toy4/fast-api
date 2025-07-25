@@ -1,6 +1,5 @@
 name: Build FastAPI Base Image
 
-# requirements.txt 변경 시 또는 수동 트리거로 실행
 on:
   push:
     paths:
@@ -30,8 +29,8 @@ jobs:
       - name: Build & push base image (pip deps)
         uses: docker/build-push-action@v3
         with:
-          context: .
-          file: ./Dockerfile.deps
+          context: ./fastapi
+          file: ./fastapi/Dockerfile.deps
           push: true
           tags: ${{ env.BASE_IMAGE }}
           cache-from: type=registry,ref=${{ env.BASE_IMAGE }}

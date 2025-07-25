@@ -29,8 +29,8 @@ jobs:
       - name: Build & push app image (code only)
         uses: docker/build-push-action@v3
         with:
-          context: ./fastapi
-          file: ./fastapi/Dockerfile
+          context: fastapi
+          file: fastapi/Dockerfile
           push: true
           tags: ${{ env.APP_IMAGE }}
           cache-from: type=registry,ref=${{ env.APP_IMAGE }}

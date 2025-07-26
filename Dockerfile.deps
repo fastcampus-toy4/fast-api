@@ -8,7 +8,7 @@ RUN pip config set global.index-url https://mirror.kakao.com/pypi/simple
 WORKDIR /app
 
 # requirements 복사
-COPY fastapi/requirements.txt .
+COPY requirements.txt .
 
 # pip install (캐시 활용)
 RUN --mount=type=cache,target=/root/.cache/pip \

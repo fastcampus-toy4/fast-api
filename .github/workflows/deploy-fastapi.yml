@@ -37,10 +37,19 @@ jobs:
           key:      ${{ secrets.SSH_PRIVATE_KEY }}
           port:     22
           script: |
+            # 1) Docker 로그인
             echo "${{ secrets.DOCKER_PASSWORD }}" \
               | sudo docker login -u "${{ secrets.DOCKER_USERNAME }}" --password-stdin
 
+            # 2) 포트 9000 점유 중인 모든 컨테이너 강제 종료/제거
+            for cid in $(sudo docker ps -q --filter "publish=9000"); do
+              sudo docker rm -f $cid || true
+            done
+
+            # 3) fastapi-app 컨테이너 제거(이전 이름이 있을 경우)
             sudo docker rm -f fastapi-app || true
+
+            # 4) 최신 이미지 Pull & Run
             sudo docker pull ${{ env.APP_IMAGE }}
             sudo docker run -d \
               --name fastapi-app \

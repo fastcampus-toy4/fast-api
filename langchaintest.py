@@ -7,5 +7,6 @@ bearer = HTTPBearer()
 @app.post("/api/auth/login")
 def receive_token(credentials: HTTPAuthorizationCredentials = Depends(bearer)):
     token = credentials.credentials
-    # TODO: 디코딩/검증 로직 또는 다른 처리
-    return {"status": "received", "token": token}
+    print("Received JWT from Spring:", token)
+    # 검증 로직 추가 가능
+    return {"status": "ok", "token": token}

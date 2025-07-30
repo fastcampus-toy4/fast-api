@@ -10,3 +10,5 @@ langchain-community
 langchain-chroma
 chromadb
 langgraph
+sentence-transformers
+torch

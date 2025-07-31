@@ -2,13 +2,16 @@
 from fastapi import FastAPI, Depends, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.ext.asyncio import AsyncSession
-from typing import List
+from fastapi.middleware.cors import CORSMiddleware
 
+from typing import List
 from core.config import settings
 from core.security import get_current_user
 from models.schemas import ChatRequest, ChatResponse, StartChatRequest, StartChatResponse, ChatMessageRequest, HistorySummary
 from services import chat_orchestrator
 from db.database import get_db_session
+
+
 
 # FastAPI 앱 초기화
 app = FastAPI(
@@ -17,19 +20,21 @@ app = FastAPI(
     version="1.0.0"
 )
 
+origins = ["*"]
+
 # CORS 미들웨어 설정 (React 앱의 주소 허용)
 app.add_middleware(
     CORSMiddleware,
+    # localhost와 실제 서버 IP 주소 모두 허용
     allow_origins=[
         "http://localhost:3000",
-        "http://155.248.175.96:3000",
-        "http://155.248.175.96:8080",
+        "http://155.248.175.96",
+        "http://155.248.175.96:3000"
     ],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_credentials=True,  # 자격 증명(쿠키 등)을 허용
+    allow_methods=["*"],     # 모든 HTTP 메소드(GET, POST 등)를 허용
+    allow_headers=["*"],     # 모든 HTTP 헤더를 허용
 )
-
 
 @app.on_event("startup")
 async def startup_event():
@@ -71,19 +76,36 @@ async def handle_chat(
     return result
 
 
+# @app.post("/chat/start", response_model=StartChatResponse, tags=["Chat"])
+# async def start_chat(
+#     request: StartChatRequest,
+#     db: AsyncSession = Depends(get_db_session),
+# ):
+#     """
+#     새로운 채팅 세션을 시작합니다.
+#     """
+#     result = await chat_orchestrator.start_new_chat_session(
+#         user_id=request.user_id,
+#         db=db
+#     )
+#     return result
+
 @app.post("/chat/start", response_model=StartChatResponse, tags=["Chat"])
 async def start_chat(
-    request: StartChatRequest,
+    request: StartChatRequest, # 요청 본문을 StartChatRequest 모델로 받습니다.
     db: AsyncSession = Depends(get_db_session),
 ):
     """
-    새로운 채팅 세션을 시작합니다.
+    새로운 채팅 세션을 시작하고, 첫 메시지가 있으면 바로 처리합니다.
     """
     result = await chat_orchestrator.start_new_chat_session(
         user_id=request.user_id,
+        # [중요] 요청에서 받은 initial_message를 전달합니다.
+        initial_message=request.initial_message,
         db=db
     )
     return result
+
 
 @app.post("/chat/message", response_model=ChatResponse, tags=["Chat"])
 async def handle_chat_message(

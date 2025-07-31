@@ -1,117 +1,81 @@
+import json # <--- 이 한 줄을 추가하세요!
 import asyncio
-from typing import List, Dict, Optional
-from datetime import datetime
-from playwright.async_api import async_playwright, Browser, Page, TimeoutError as PlaywrightTimeoutError
-from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.output_parsers import JsonOutputParser
-from langchain_core.exceptions import OutputParserException
-from pydantic import ValidationError
+
+# services/crawl_service.py
+from typing import Dict, List
+from langchain_openai import ChatOpenAI
+from models.schemas import CrawledInfo # Pydantic 모델 사용
+from core.config import settings
 
 
-from models.schemas import CrawledInfo, FullVisitabilityAnalysis
-
-
-def get_llm():
-    from main import app
-    return app.state.llm
-
-
-async def get_final_recommendations_with_crawling(final_candidates: List[Dict], user_time: str) -> List[Dict]:
+async def get_restaurants_realtime_info(restaurants: List[Dict]) -> List[Dict]:
     """
-    최종 후보 레스토랑 목록을 크롤링하여 실시간 정보를 확인하고,
-    영업 중인 곳만 필터링하여 반환합니다.
+    ⚠️ 중요: 이 함수는 실제 크롤링 로직의 '플레이스홀더'입니다.
+    Selenium과 같은 블로킹 I/O 라이브러리를 FastAPI의 메인 프로세스에서 직접 실행하면
+    서버 전체 성능이 심각하게 저하됩니다. (이벤트 루프 차단)
+
+    [권장 해결책]
+    1. Celery 또는 ARQ와 같은 분산 태스크 큐(Task Queue)를 도입합니다.
+    2. FastAPI는 크롤링 작업을 이 큐에 전달하고 즉시 사용자에게 응답합니다.
+    3. 별도의 '워커(Worker)' 프로세스가 큐에서 작업을 가져와 Selenium으로 크롤링을 수행하고 결과를 DB에 저장합니다.
+    4. 클라이언트는 나중에 작업 상태를 폴링하거나 WebSocket으로 결과를 수신합니다.
+
+    아래 코드는 이러한 비동기 아키텍처를 시뮬레이션한 예시입니다.
     """
-    open_restaurants = []
-    async with async_playwright() as playwright:
-        browser = await playwright.chromium.launch()
-        tasks = [_get_restaurant_info_task(browser, f"{r['name']} {r.get('branch_name', '')}".strip()) for r in final_candidates]
-        crawled_results = await asyncio.gather(*tasks)
-        await browser.close()
-
-        visitable_check_tasks, successful_crawls = [], []
-        for data in crawled_results:
-            if data.get('crawling_success'):
-                visitable_check_tasks.append(_is_restaurant_open_llm_async(data, user_time))
-                successful_crawls.append(data)
-        
-        if visitable_check_tasks:
-            visitable_results = await asyncio.gather(*visitable_check_tasks)
-            for i, is_visitable in enumerate(visitable_results):
-                if is_visitable:
-                    open_restaurants.append(successful_crawls[i])
-                    
-    return open_restaurants
-
-
-async def _get_restaurant_info_task(browser: Browser, restaurant_full_name: str) -> dict:
-    """단일 레스토랑의 정보를 네이버 지도에서 크롤링합니다."""
-    result_data = {"restaurant_full_name": restaurant_full_name, "crawling_success": False}
-    page = await browser.new_page()
-    try:
-        await page.goto("https://map.naver.com/v5/search", wait_until="load", timeout=20000)
-        await page.locator("input.input_search").wait_for(state="visible", timeout=10000)
-        await page.locator("input.input_search").fill(restaurant_full_name)
-        await page.locator("input.input_search").press("Enter")
-
-        search_iframe = page.frame_locator("#searchIframe")
-        first_result_selector = 'a.place_bluelink'
-        try:
-            await search_iframe.locator(first_result_selector).first.wait_for(state="visible", timeout=10000)
-            await search_iframe.locator(first_result_selector).first.click()
-        except PlaywrightTimeoutError:
-            pass # 단일 결과로 바로 넘어가는 경우
-
-        entry_iframe = page.frame_locator("#entryIframe")
-        info_div_selector = "div.PIbes"
-        await entry_iframe.locator(info_div_selector).wait_for(state="visible", timeout=10000)
-        all_text = await entry_iframe.locator(info_div_selector).inner_text()
-
-        if not all_text or not all_text.strip():
-            raise ValueError("크롤링된 텍스트가 비어 있습니다.")
-
-        processed_info = await _process_with_llm_crawler_async(all_text, restaurant_full_name)
-        if processed_info:
-            result_data.update(processed_info.model_dump())
-            result_data["crawling_success"] = True
-        else:
-            result_data["crawling_error"] = "LLM 데이터 정형화 실패"
-            
-    except Exception as e:
-        error_message = f"{type(e).__name__}: {e}"
-        result_data["crawling_error"] = error_message
-        print(f"크롤링 오류 '{restaurant_full_name}': {error_message}")
-    finally:
-        await page.close()
-    return result_data
-
-
-async def _process_with_llm_crawler_async(raw_text: str, name: str) -> Optional[CrawledInfo]:
-    """LLM을 사용하여 크롤링된 텍스트에서 정형화된 정보를 추출합니다."""
-    parser = JsonOutputParser(pydantic_object=CrawledInfo)
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", "You extract restaurant info from text into JSON. Follow the format.\n{format_instructions}"),
-        ("user", "Extract info for '{name}' from the following text. Rules: 1. Exclude current status like 'open' from hours. 2. Use 'holiday_info' for closing days. 3. Use null for missing values.\n\nText:\n---\n{raw_text}\n---")
-    ])
-    chain = prompt | get_llm() | parser
-    try:
-        return await chain.ainvoke({
-            "format_instructions": parser.get_format_instructions(),
-            "name": name, "raw_text": raw_text
-        })
-    except (ValidationError, OutputParserException) as e:
-        print(f"LLM 파싱 오류 '{name}': {e}")
-        return None
-
-
-async def _is_restaurant_open_llm_async(crawled_data: Dict, user_time: str) -> bool:
-    """LLM을 사용하여 크롤링된 영업시간 정보와 사용자 시간을 비교해 방문 가능 여부를 판단합니다."""
-    today_weekday = ["월요일", "화요일", "수요일", "목요일", "금요일", "토요일", "일요일"][datetime.today().weekday()]
-    prompt = f"영업시간: {crawled_data.get('operating_hours', '정보 없음')}, 휴무일: {crawled_data.get('holiday_info', '정보 없음')}, 방문 시간: {user_time}, 오늘 요일: {today_weekday}. 방문 가능한지 JSON으로 분석해주세요."
+    print(f"백그라운드 크롤링 시뮬레이션 시작 ({len(restaurants)}곳 대상)...")
     
-    structured_llm = get_llm().with_structured_output(FullVisitabilityAnalysis)
+    # 실제로는 Task Queue에 작업을 보내고, 여기서는 가상 결과를 반환합니다.
+    # 각 음식점의 크롤링이 성공했다고 가정하고 임시 데이터를 채웁니다.
+    crawled_results = []
+    for r in restaurants:
+        full_name = f"{r['name']} {r.get('branch_name', '')}".strip()
+        # 가상 크롤링 결과 생성
+        crawled_data = {
+            "restaurant_full_name": full_name,
+            "address": "서울시 어딘가 (크롤링 필요)",
+            "operating_hours": "매일 11:00 - 22:00 (크롤링 필요)",
+            "phone_number": "02-1234-5678 (크롤링 필요)",
+            "holiday_info": "연중무휴 (크롤링 필요)",
+        }
+        crawled_results.append(crawled_data)
+
+    print("백그라운드 크롤링 시뮬레이션 완료.")
+    return crawled_results
+
+
+async def check_visitable(info: Dict, user_time: str) -> bool:
+    """
+    크롤링된 영업시간 정보와 사용자의 방문 희망 시간을 바탕으로
+    LLM을 이용해 현재 방문 가능한지 여부를 판단합니다.
+    """
+    # model_kwargs를 사용하여 JSON 모드 활성화
+    llm = ChatOpenAI(
+        model="gpt-4o", 
+        temperature=0, 
+        api_key=settings.OPENAI_API_KEY,
+        model_kwargs={
+            "response_format": {"type": "json_object"}
+        }
+    )
+    
+    prompt = f"""
+    아래 음식점 정보와 사용자 방문 희망 시간을 보고, 현재 방문이 가능한지 판단해주세요.
+    "visitable" 필드에 true 또는 false 값만 포함하는 JSON 형식으로만 답변해주세요.
+    어떠한 설명도 추가하지 말고 JSON 객체만 응답해야 합니다.
+
+    [음식점 정보]
+    - 영업시간: {info.get('opening_hours', '정보 없음')}
+
+    [방문 희망 시간]
+    - {user_time}
+    """
+    
     try:
-        response = await structured_llm.ainvoke(prompt)
-        return response.final_conclusion.is_visitable
+        response = await llm.ainvoke(prompt)
+        # LLM의 응답(문자열)을 JSON 객체로 파싱
+        result_json = json.loads(response.content)
+        return result_json.get("visitable", False)
     except Exception as e:
-        print(f"영업 여부 판단 오류 '{crawled_data['restaurant_full_name']}': {e}")
+        print(f"영업시간 판단 LLM 오류: {e}")
+        # 오류 발생 시 안전하게 '방문 불가'로 처리
         return False

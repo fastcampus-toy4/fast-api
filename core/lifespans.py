@@ -50,10 +50,14 @@ async def lifespan(app: FastAPI):
             embedding_function=app.state.embedding_function
         )
         print("✅ 데이터 로딩 완료.")
-    except FileNotFoundError as e:
-        print(f"[오류] 사전 계산 데이터 파일을 찾을 수 없습니다: {e}")
-        print("-> 'data/' 디렉토리에 'food_clusters.csv'와 'representative_foods.csv' 파일이 있는지 확인해주세요.")
-    
+    except Exception as e: # FileNotFoundError 대신 모든 에러(Exception)를 잡도록 변경
+        print("="*50)
+        print(f"[치명적 시작 오류] 애플리케이션 초기화 중 에러 발생: {e}")
+        import traceback
+        traceback.print_exc() # 오류의 모든 상세 내용을 출력!
+        print("="*50)
+        # 여기서 sys.exit(1) 등으로 서버를 강제 종료할 수도 있습니다.
+
     print("="*50)
     print("🚀 시스템이 성공적으로 시작되었습니다.")
     yield

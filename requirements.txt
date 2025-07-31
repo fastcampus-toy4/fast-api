@@ -12,6 +12,3 @@ pydantic
 pandas
 playwright
 chromadb
-python-jose
-aiomysql
-

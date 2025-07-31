@@ -12,25 +12,35 @@ async def extract_initial_request(first_message: str) -> UserRequestInfo:
     """사용자의 첫 메시지에서 한 번에 모든 정보를 추출합니다."""
     structured_llm = get_llm().with_structured_output(UserRequestInfo)
 
-    prompt = f"""당신은 사용자의 음식점 추천 요청을 분석하여 Pydantic 모델 형식에 맞게 정보를 추출하는 전문가입니다.
+    # ▼▼▼▼▼ amenities 규칙을 매우 구체적으로 수정한 최종 프롬프트 ▼▼▼▼▼
+    prompt = f"""당신은 사용자의 음식점 추천 요청을 분석하여 JSON 객체로 변환하는 전문가입니다.
 
 [사용자의 첫 요청 메시지]
 "{first_message}"
 
-[추출할 정보]
-- location: 지역 또는 장소 (예: 강남역, 성수동, 잠실역)
-- time: 시간 (예: 오늘 저녁 7시, 내일 점심)
-- dietary_restrictions: 식단 제약 (예: 채식, 글루텐 프리)
-- disease: 관련 질병 (예: 고혈압, 당뇨)
-- amenities: 편의시설 (예: 주차, 놀이방)
-- other_requests: 그 외 기타 요청 (예: 조용한, 분위기 좋은, 가성비)
+[추출 규칙 및 정의]
+1.  **`amenities` (편의시설)**: 아래 목록에 있는 단어와 정확히 일치하는 경우에만 추출합니다.
+    - **허용 목록**: ["주차", "와이파이", "화장실", "배달"]
 
-[규칙]
-- 메시지에 언급되지 않은 정보는 null로 유지하세요.
-- 사용자가 없다고 말한 정보(예: 질병 없음)는 "없음"으로 채워주세요.
+2.  **`other_requests` (기타 요청)**: `amenities` 허용 목록에 없는 모든 요구사항은 이 필드에 요약하여 넣습니다.
+    - 예시: "조용한", "분위기 좋은", "가성비 좋은", "혼밥하기 좋은", "데이트하기 좋은", "뷰가 좋은", "매콤한", "반려동물 동반", "콜키지 프리"
 
-사용자의 요청 메시지를 분석하여 위의 Pydantic 모델에 맞게 정보를 추출해주세요.
+3.  언급되지 않은 정보는 null로 유지하세요.
+
+[중요 학습 예시]
+- 사용자 요청: "주차되고 가성비 좋은 곳"
+- 올바른 추출: {{ "amenities": ["주차"], "other_requests": "가성비 좋은 곳" }}
+
+- 사용자 요청: "배달되고 반려동물 동반 가능한 곳"
+- 올바른 추출: {{ "amenities": ["배달"], "other_requests": "반려동물 동반 가능" }}
+
+- 사용자 요청: "조용하고 와이파이 되는 곳"
+- 올바른 추출: {{ "amenities": ["와이파이"], "other_requests": "조용한 곳" }}
+
+위 규칙과 예시를 바탕으로, 사용자의 첫 요청 메시지를 분석하여 JSON으로 변환해주세요.
 """
+    # ▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲
+
     try:
         return await structured_llm.ainvoke(prompt)
     except Exception as e:
@@ -38,11 +48,11 @@ async def extract_initial_request(first_message: str) -> UserRequestInfo:
         return UserRequestInfo()
 
 async def extract_info_from_message(conversation_history: List[str], last_bot_question: str) -> UserRequestInfo:
-    """대화 내용과 AI의 마지막 질문을 바탕으로 사용자 답변에서 정보를 추출합니다."""
+    """대화의 맥락을 바탕으로, AI의 마지막 질문에 대한 답변만 추출합니다."""
     structured_llm = get_llm().with_structured_output(UserRequestInfo)
     history_string = "\n".join(conversation_history)
 
-    prompt = f"""당신은 사용자의 최신 답변에서 정보를 추출하는 전문가입니다.
+    prompt = f"""당신은 사용자의 최신 답변에서 AI의 마지막 질문과 관련된 정보만 추출하는 전문가입니다.
 
 [분석 대상 대화]
 {history_string}
@@ -51,26 +61,21 @@ async def extract_info_from_message(conversation_history: List[str], last_bot_qu
 {last_bot_question}
 
 [가장 중요한 규칙]
-'AI의 마지막 질문'에 대한 사용자의 답변이 "없음", "없어요", "아니요", "괜찮아요" 등 명백한 부정의 의미라면, 반드시 해당 필드를 **문자열 "없음"**으로 채워야 합니다. 절대 null로 비워두지 마세요.
+'AI의 마지막 질문'에 대한 사용자의 답변이 "없음", "없어요", "아니요" 등 명백한 부정의 의미라면, 반드시 해당 필드를 **문자열 "없음"**으로 채워야 합니다.
 
 [추가 지침]
 - 'AI의 마지막 질문'과 관련 없는 정보는 추출하지 마세요.
 - 답변에 없는 정보는 null로 유지하세요.
-
-[예시]
-AI의 마지막 질문: 특별히 피해야 할 음식이나 식단(채식 등)이 있으신가요? (없으면 '없음')
-사용자 답변: 없음
-결과: {{ "dietary_restrictions": "없음" }}
 """
     try:
         return await structured_llm.ainvoke(prompt)
     except Exception as e:
-        print(f"[NLU 오류] 정보 추출 실패: {e}")
+        print(f"[NLU 오류] 대화 중 정보 추출 실패: {e}")
         return UserRequestInfo()
 
 async def extract_gu_from_location(location: str) -> str:
     """사용자가 언급한 위치에서 서울시 '구' 이름을 추출합니다."""
-    seoul_gu_extractor = get_llm().with_structured_output(SeoulGuInfo)
+    structured_llm = get_llm().with_structured_output(SeoulGuInfo)
     prompt = f"""당신은 서울 지리에 매우 능숙한 전문가입니다. 
 사용자의 문장에서 가장 관련성이 높은 서울의 행정구역('OO구') 하나를 추출해야 합니다.
 
@@ -82,16 +87,13 @@ async def extract_gu_from_location(location: str) -> str:
 [예시]
 - 사용자 문장: "잠실역 인근" -> 결과: "송파구"
 - 사용자 문장: "홍대 쪽" -> 결과: "마포구"
-- 사용자 문장: "종로에서 약속있어" -> 결과: "종로구"
-- 사용자 문장: "성수동 카페거리 가고싶어" -> 결과: "성동구"
-- 사용자 문장: "강남 어딘가" -> 결과: "강남구"
-- 사용자 문장: "광화문 근처" -> 결과: "종로구"
-- 사용자 문장: "서울숲" -> 결과: "성동구"
+- 사용자 문장: "성수동 카페거리" -> 결과: "성동구"
+- 사용자 문장: "판교" -> 결과: "알 수 없음"
 
 [사용자 문장]
 "{location}"
 """
-    gu_info = await seoul_gu_extractor.ainvoke(prompt)
+    gu_info = await structured_llm.ainvoke(prompt)
     return gu_info.gu_name
 
 async def normalize_disease_name(disease_input: str) -> str:

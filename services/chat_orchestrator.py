@@ -11,6 +11,7 @@ from . import db_service, filter_service, crawl_service, nlu_service
 # --- 핵심 로직: 새로운 채팅 시작 및 첫 메시지 처리 ---
 async def start_new_chat_session(user_id: str, initial_message: Optional[str], db: AsyncSession) -> StartChatResponse:
     session_id = str(uuid.uuid4())
+
     state = {
         "session_id": session_id,
         "user_id": user_id,

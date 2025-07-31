@@ -54,19 +54,19 @@ def read_root():
     return {"message": f"Welcome to {settings.PROJECT_NAME}"}
 
 
-@app.post("/api/v1/chat", response_model=ChatResponse, tags=["Chat"])
+@app.post("/api/auth/login", response_model=ChatResponse, tags=["Chat"])
 async def handle_chat(
     request: ChatRequest,
     db: AsyncSession = Depends(get_db_session),
     # JWT 토큰 검증 (주석 해제하여 활성화)
-    # current_user: dict = Depends(get_current_user) 
+    current_user: dict = Depends(get_current_user) 
 ):
     """
     챗봇과 대화하여 음식점을 추천받는 메인 엔드포인트입니다.
     - `message`: 사용자가 입력한 메시지
     - `session_id`: 대화의 연속성을 위해 클라이언트가 저장하고 보내야 하는 ID. 첫 대화 시에는 비워둡니다.
     """
-    # print(f"현재 사용자: {current_user['username']}") # 인증된 사용자 이름 로깅
+    print(f"현재 사용자: {current_user['username']}") # 인증된 사용자 이름 로깅
     
     result = await chat_orchestrator.process_chat_message(
         message=request.message,

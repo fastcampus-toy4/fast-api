@@ -3,6 +3,7 @@ from pydantic import BaseModel, Field
 from typing import List, Optional, Dict
 from datetime import datetime
 
+
 # --- API 요청/응답 모델 ---
 
 class ChatRequest(BaseModel):
@@ -10,35 +11,46 @@ class ChatRequest(BaseModel):
     session_id: Optional[str] = None # 대화의 연속성을 위한 세션 ID
 
 class FinalRecommendation(BaseModel):
-    restaurant_full_name: str
-    address: Optional[str] = None
+    name: str
+    branch_name: Optional[str] = None
+    category: str
+    address: str
     phone_number: Optional[str] = None
-    operating_hours: Optional[str] = None
-    holiday_info: Optional[str] = None
-    reason: Optional[str] = "실시간 정보 확인 결과, 현재 방문 가능합니다."
+    opening_hours: Optional[str] = None
+    rating: Optional[float] = None
+    review_count: Optional[int] = None
+    visitable_now: bool = False
+    reason: str
 
 class ChatResponse(BaseModel):
     response: str
     session_id: str
-    is_final: bool = False # 추천이 최종적으로 완료되었는지 여부
+    is_final: bool = False
     recommendations: Optional[List[FinalRecommendation]] = None
-
+    state: Optional[dict] = None # state 필드 확인
 
 # --- 내부 로직용 Pydantic 모델 ---
 
 class UserRequestInfo(BaseModel):
-    """사용자의 전체 요청 정보를 구조화하는 모델"""
-    location: Optional[str] = Field(None, description="사용자가 언급한 지역 또는 장소")
-    time: Optional[str] = Field(None, description="사용자가 언급한 시간")
-    dietary_restrictions: Optional[str] = Field(None, description="식단 제약 정보 (없으면 '없음')")
-    disease: Optional[str] = Field(None, description="사용자가 언급한 질병 정보 (없으면 '없음')")
-    amenities: List[str] = Field(default=[], description="요청한 편의시설 목록")
-    other_requests: Optional[str] = Field(None, description="그 외 기타 요청사항 요약")
-    
-    def is_ready(self) -> bool:
-        """추천 프로세스를 시작하기에 충분한 정보가 수집되었는지 확인"""
-        return all([self.location, self.time, self.dietary_restrictions, self.disease])
+    location: Optional[str] = None
+    time: Optional[str] = None
+    dietary_restrictions: Optional[str] = None
+    disease: Optional[str] = None
+    amenities: List[str] = Field(default_factory=list)
+    other_requests: Optional[str] = None
 
+    def is_ready(self) -> bool:
+        """
+        모든 필수 정보가 수집되었는지 확인하는 함수.
+        [수정] other_requests가 채워졌는지 확인하는 로직을 추가합니다.
+        """
+        return all([
+            self.location,
+            self.time,
+            self.dietary_restrictions,
+            self.disease,
+            self.other_requests is not None # 'None'이 아니어야만 통과
+        ])
 class CrawledInfo(BaseModel):
     """크롤링된 텍스트에서 추출한 정보 모델"""
     address: Optional[str] = Field(None, description="추출된 주소")
@@ -47,7 +59,8 @@ class CrawledInfo(BaseModel):
     holiday_info: Optional[str] = Field(None, description="추출된 휴무일 정보")
 
 class StartChatRequest(BaseModel):
-    user_id: Optional[str] = None
+    user_id: str
+    initial_message: Optional[str] = None
 
 class StartChatResponse(BaseModel):
     state: dict
@@ -61,14 +74,9 @@ class HistorySummary(BaseModel):
     session_id: str
     content: str
     created_at: datetime
-
-class VisitabilityConclusion(BaseModel):
-    is_visitable: bool = Field(..., description="현재 시간에 해당 식당이 방문 가능한지 여부")
-    reason: Optional[str] = Field(None, description="그렇게 판단한 이유 요약")
-
-class FullVisitabilityAnalysis(BaseModel):
-    restaurant_full_name: str = Field(..., description="식당의 전체 이름")
-    operating_hours: Optional[str] = Field(None, description="영업시간")
-    holiday_info: Optional[str] = Field(None, description="휴무일")
-    final_conclusion: VisitabilityConclusion
+class StartChatRequest(BaseModel):
+    user_id: str
+    # [중요] 사용자의 첫 메시지를 받을 수 있도록 이 항목을 추가합니다.
+    # optional 필드로 만들기 위해 기본값을 None으로 설정합니다.
+    initial_message: str | None = None
 

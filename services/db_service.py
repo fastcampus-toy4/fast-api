@@ -29,22 +29,26 @@ async def get_normalized_menus_for_restaurants(db: AsyncSession, restaurants: Li
     if not restaurants:
         return {}
 
-    # 레스토랑 이름과 지점명으로 IN 절을 만들기 위한 준비
-    # (name, branch_name) 쌍으로 조회하는 것이 더 정확하지만, 여기서는 name을 기준으로 단순화
     restaurant_names = list(set(r['name'] for r in restaurants))
+    params = {"names": restaurant_names}
     
+    # ===================================================================
+    # [수정] MySQL 문법에 맞게 '= ANY(:names)'를 'IN :names'로 변경합니다.
+    # SQLAlchemy가 :names 파라미터를 (value1, value2, ...) 형태로 자동 변환해줍니다.
+    # ===================================================================
     query = text("""
         SELECT restaurant_name, branch_name, normalized_name 
         FROM restaurant_menu 
-        WHERE restaurant_name = ANY(:names) AND normalized_name IS NOT NULL
+        WHERE restaurant_name IN :names AND normalized_name IS NOT NULL
     """)
-    params = {"names": restaurant_names}
-    
+    # ===================================================================
+
     result = await db.execute(query, params)
     
     menus_by_restaurant = {}
     for row in result.mappings():
-        full_name = f"{row['restaurant_name']} {row.get('branch_name', '')}".strip()
+        # 지점명이 없는 경우를 안전하게 처리 (branch_name or '')
+        full_name = f"{row['restaurant_name']} {row.get('branch_name', '') or ''}".strip()
         if full_name not in menus_by_restaurant:
             menus_by_restaurant[full_name] = set()
         menus_by_restaurant[full_name].add(row['normalized_name'])

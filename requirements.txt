@@ -12,4 +12,6 @@ pydantic
 pandas
 playwright
 chromadb
-python-jose[cryptography]
+python-jose
+aiomysql
+

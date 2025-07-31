@@ -5,6 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from langchain_openai import ChatOpenAI
 
 from models.schemas import ChatResponse, UserRequestInfo, FinalRecommendation, StartChatResponse, HistorySummary
+from fastapi import HTTPException
 from typing import List
 from datetime import datetime
 from . import db_service, filter_service, crawl_service

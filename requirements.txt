@@ -12,3 +12,4 @@ pydantic
 pandas
 playwright
 chromadb
+python-jose[cryptography]

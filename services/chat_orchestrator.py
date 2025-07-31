@@ -262,40 +262,45 @@ async def process_chat_message(state: dict, user_input: str, db: AsyncSession) -
             return ChatResponse(response=f"'{user_info.location}' 지역을 정확히 이해하지 못했어요. '강남구', '송파구' 처럼 다시 말씀해주시겠어요?", session_id=session_id, is_final=True, state=state)
         print(f"    - 변환된 위치 (구): '{location_gu}'")
 
-        # [수정] 2. 변환된 지역명(location_gu)을 DB 조회에 사용
         restaurants_step1 = await db_service.get_restaurants_from_db(db, location_gu, user_info.amenities)
         if not restaurants_step1:
             print("[DEBUG] 종료: 1단계에서 후보 음식점을 찾지 못했습니다.")
             return ChatResponse(response="해당 조건에 맞는 음식점이 없습니다.", session_id=session_id, is_final=True, state=state)
-        print(f"[DEBUG] 1단계 통과. 후보: {len(restaurants_step1)}개")
+        print(f"[DEBUG] 1단계 통과 (위치/편의시설). 후보 음식점: {len(restaurants_step1)}개")
 
         menus_by_restaurant = await db_service.get_normalized_menus_for_restaurants(db, restaurants_step1)
+        # ▼▼▼▼▼ [수정] 메뉴 정보가 있는 음식점만 후보로 다시 정의 ▼▼▼▼▼
+        restaurants_step2 = [r for r in restaurants_step1 if f"{r['name']} {r.get('branch_name', '')}".strip() in menus_by_restaurant]
+        if not restaurants_step2:
+            print("[DEBUG] 종료: 2단계에서 메뉴 정보가 있는 음식점을 찾지 못했습니다.")
+            return ChatResponse(response="조건에 맞는 음식점은 찾았지만, 메뉴 정보가 없어 추천할 수 없네요.", session_id=session_id, is_final=True, state=state)
+        print(f"[DEBUG] 2단계 통과 (메뉴 보유). 후보 음식점: {len(restaurants_step2)}개")
+        
         all_menus = {menu for menus in menus_by_restaurant.values() for menu in menus}
-        print(f"[DEBUG] 2단계 통과. 전체 메뉴 후보: {len(all_menus)}개")
 
         # [수정] 3. 질병명 정규화
         print(f"    - 원본 질병 입력: '{user_info.disease}'")
         normalized_disease = await nlu_service.normalize_disease_name(user_info.disease)
         print(f"    - 정규화된 질병명: '{normalized_disease}'")
 
-        # [수정] 4. 정규화된 질병명을 필터링에 사용
         suitable_menus = await filter_service.filter_menus_by_health(all_menus, normalized_disease, user_info.dietary_restrictions)
         if not suitable_menus:
             print("[DEBUG] 종료: 3단계(건강 필터링)에서 적합한 메뉴를 찾지 못했습니다.")
             return ChatResponse(response="고객님의 건강 조건에 맞는 메뉴를 찾지 못했습니다.", session_id=session_id, is_final=True, state=state)
-        print(f"[DEBUG] 3단계 통과. 건강 메뉴 후보: {len(suitable_menus)}개")
+        print(f"[DEBUG] 3단계 통과 (건강 메뉴). 적합 메뉴: {len(suitable_menus)}개")
 
-        restaurants_step4 = [r for r in restaurants_step1 if any(menu in suitable_menus for menu in menus_by_restaurant.get(f"{r['name']} {r.get('branch_name', '')}".strip(), set()))]
+        # ▼▼▼▼▼ [수정] restaurants_step2를 기준으로 필터링 ▼▼▼▼▼
+        restaurants_step4 = [r for r in restaurants_step2 if any(menu in suitable_menus for menu in menus_by_restaurant.get(f"{r['name']} {r.get('branch_name', '')}".strip(), set()))]
         if not restaurants_step4:
             print("[DEBUG] 종료: 4단계(메뉴 판매점 필터링)에서 적합한 음식점을 찾지 못했습니다.")
             return ChatResponse(response="건강에 좋은 메뉴를 파는 음식점을 찾지 못했습니다.", session_id=session_id, is_final=True, state=state)
-        print(f"[DEBUG] 4단계 통과. 후보: {len(restaurants_step4)}개")
+        print(f"[DEBUG] 4단계 통과 (메뉴 판매점). 후보 음식점: {len(restaurants_step4)}개")
 
         restaurants_step5 = await filter_service.filter_restaurants_by_review(restaurants_step4, user_info.other_requests)
-        print(f"[DEBUG] 5단계 통과 (리뷰 필터링). 후보: {len(restaurants_step5)}개")
+        print(f"[DEBUG] 5단계 통과 (리뷰 필터링). 후보 음식점: {len(restaurants_step5)}개")
 
         final_recommendations = await crawl_service.get_final_recommendations_with_crawling(restaurants_step5[:10], user_info.time)
-        print(f"[DEBUG] 6단계 통과 (크롤링 및 최종 필터링). 최종 후보: {len(final_recommendations)}개")
+        print(f"[DEBUG] 6단계 통과 (최종 필터링). 최종 추천: {len(final_recommendations)}개")
 
         if not final_recommendations:
             return ChatResponse(response="후보 맛집은 찾았지만, 아쉽게도 요청하신 시간에 영업 중인 곳이 없네요.", session_id=session_id, is_final=True, state=state)

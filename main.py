@@ -1,149 +1,79 @@
 # main.py
-from fastapi import FastAPI, Depends, HTTPException, status
+
+from fastapi import FastAPI, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.ext.asyncio import AsyncSession
-from fastapi.middleware.cors import CORSMiddleware
-
 from typing import List
+
+# --- core, models, services 모듈 임포트 ---
 from core.config import settings
-from core.security import get_current_user
-from models.schemas import ChatRequest, ChatResponse, StartChatRequest, StartChatResponse, ChatMessageRequest, HistorySummary
+from core.lifespans import lifespan # 새로운 startup 방식
+from models.schemas import ChatRequest, ChatResponse, StartChatRequest, StartChatResponse, HistorySummary
 from services import chat_orchestrator
-from db.database import get_db_session
+from db.dependencies import get_db # 새로운 DB 세션 의존성
 
-
-
-# FastAPI 앱 초기화
+# --- FastAPI 앱 초기화 ---
 app = FastAPI(
     title=settings.PROJECT_NAME,
     description="AI 기반 음식점 추천 시스템 API",
-    version="1.0.0"
+    version="1.0.0",
+    lifespan=lifespan  # @app.on_event("startup") 대신 lifespan을 사용
 )
 
-origins = ["*"]
-
-# CORS 미들웨어 설정 (React 앱의 주소 허용)
+# --- CORS 미들웨어 설정 ---
 app.add_middleware(
     CORSMiddleware,
-    # localhost와 실제 서버 IP 주소 모두 허용
     allow_origins=[
         "http://localhost:3000",
         "http://155.248.175.96",
-        "http://155.248.175.96:3000"
+        "http://155.248.175.96:3000",
+        "http://155.248.175.96:8080", # Spring 서버 주소도 포함
     ],
-    allow_credentials=True,  # 자격 증명(쿠키 등)을 허용
-    allow_methods=["*"],     # 모든 HTTP 메소드(GET, POST 등)를 허용
-    allow_headers=["*"],     # 모든 HTTP 헤더를 허용
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
-@app.on_event("startup")
-async def startup_event():
-    # 애플리케이션 시작 시, data_loader 모듈을 임포트하여
-    # 데이터가 메모리에 미리 로드되도록 합니다.
-    try:
-        from services import data_loader
-        print("✅ 사전 데이터 로더 모듈이 성공적으로 초기화되었습니다.")
-    except Exception as e:
-        print(f"🔥 서버 시작 실패: 데이터 로딩 중 치명적 오류 발생. {e}")
-        # 이 경우 서버가 정상 작동할 수 없으므로, 필요 시 프로세스를 강제 종료할 수 있습니다.
-        # import os; os._exit(1)
-
+# --- API 엔드포인트(경로) 정의 ---
 
 @app.get("/", tags=["Root"])
 def read_root():
+    """서버의 동작 상태를 확인하는 기본 엔드포인트입니다."""
     return {"message": f"Welcome to {settings.PROJECT_NAME}"}
 
-
-@app.post("/api/v1/chat", response_model=ChatResponse, tags=["Chat"])
-async def handle_chat(
-    request: ChatRequest,
-    db: AsyncSession = Depends(get_db_session),
-    # JWT 토큰 검증 (주석 해제하여 활성화)
-    # current_user: dict = Depends(get_current_user) 
-):
-    """
-    챗봇과 대화하여 음식점을 추천받는 메인 엔드포인트입니다.
-    - `message`: 사용자가 입력한 메시지
-    - `session_id`: 대화의 연속성을 위해 클라이언트가 저장하고 보내야 하는 ID. 첫 대화 시에는 비워둡니다.
-    """
-    # print(f"현재 사용자: {current_user['username']}") # 인증된 사용자 이름 로깅
-    
-    result = await chat_orchestrator.process_chat_message(
-        message=request.message,
-        session_id=request.session_id,
-        db=db
-    )
-    return result
-
-
-# @app.post("/chat/start", response_model=StartChatResponse, tags=["Chat"])
-# async def start_chat(
-#     request: StartChatRequest,
-#     db: AsyncSession = Depends(get_db_session),
-# ):
-#     """
-#     새로운 채팅 세션을 시작합니다.
-#     """
-#     result = await chat_orchestrator.start_new_chat_session(
-#         user_id=request.user_id,
-#         db=db
-#     )
-#     return result
-
 @app.post("/chat/start", response_model=StartChatResponse, tags=["Chat"])
-async def start_chat(
-    request: StartChatRequest, # 요청 본문을 StartChatRequest 모델로 받습니다.
-    db: AsyncSession = Depends(get_db_session),
-):
+async def start_chat(request: StartChatRequest, db: AsyncSession = Depends(get_db)):
     """
-    새로운 채팅 세션을 시작하고, 첫 메시지가 있으면 바로 처리합니다.
+    새로운 채팅 세션을 시작하고, 사용자의 첫 메시지가 있다면 함께 처리합니다.
     """
-    result = await chat_orchestrator.start_new_chat_session(
+    return await chat_orchestrator.start_new_chat_session(
         user_id=request.user_id,
-        # [중요] 요청에서 받은 initial_message를 전달합니다.
         initial_message=request.initial_message,
         db=db
     )
-    return result
-
 
 @app.post("/chat/message", response_model=ChatResponse, tags=["Chat"])
-async def handle_chat_message(
-    request: ChatMessageRequest,
-    db: AsyncSession = Depends(get_db_session),
-):
+async def post_message(request: ChatRequest, db: AsyncSession = Depends(get_db)):
     """
-    챗봇과 대화하여 음식점을 추천받는 메인 엔드포인트입니다.
-    - `state`: 현재 대화의 상태
-    - `user_input`: 사용자가 입력한 메시지
+    진행 중인 대화에서 사용자의 메시지를 받아 처리하고 다음 응답을 반환합니다.
     """
-    result = await chat_orchestrator.process_chat_message(
+    if not request.user_input:
+        raise HTTPException(status_code=422, detail="user_input 필드는 비워둘 수 없습니다.")
+        
+    return await chat_orchestrator.process_chat_message(
         state=request.state,
         user_input=request.user_input,
         db=db
     )
-    return result
 
-@app.get("/chat/history/{session_id}", response_model=ChatResponse, tags=["Chat"])
-async def get_chat_history(
-    session_id: str,
-    db: AsyncSession = Depends(get_db_session),
-):
+@app.get("/history/{user_id}", response_model=List[HistorySummary], tags=["History"])
+async def get_user_history(user_id: str, db: AsyncSession = Depends(get_db)):
     """
-    특정 채팅 세션의 기록을 조회합니다.
+    특정 사용자의 모든 채팅 기록 요약 목록을 조회합니다.
     """
-    result = await chat_orchestrator.get_chat_history(session_id=session_id, db=db)
-    return result
+    return await chat_orchestrator.get_user_history(user_id=user_id, db=db)
 
-@app.get("/history/{user_id}", response_model=List[HistorySummary], tags=["Chat"])
-async def get_user_history(
-    user_id: str,
-    db: AsyncSession = Depends(get_db_session),
-):
-    """
-    사용자별 채팅 세션 목록을 조회합니다.
-    """
-    result = await chat_orchestrator.get_user_history(user_id=user_id, db=db)
-    return result
-
-
+# --- 서버 실행 코드 ---
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("main:app", host="0.0.0.0", port=9000, reload=True)

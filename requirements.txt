@@ -1,14 +1,14 @@
-# requirements.txt (슬림/배포용)
+# requirements.txt
 fastapi
-uvicorn
+uvicorn[standard]
 python-dotenv
+sqlalchemy
 pymysql
-pandas
-langchain
 langchain-openai
 langchain-community
-langchain-chroma
+langchain-google-community
+google-api-python-client
+pydantic
+pandas
+playwright
 chromadb
-langgraph
-sentence-transformers
-torch

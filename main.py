@@ -36,6 +36,7 @@ app.add_middleware(
     allow_headers=["*"],     # 모든 HTTP 헤더를 허용
 )
 
+
 @app.on_event("startup")
 async def startup_event():
     # 애플리케이션 시작 시, data_loader 모듈을 임포트하여

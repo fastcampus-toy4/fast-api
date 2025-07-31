@@ -2,11 +2,10 @@
 from fastapi import FastAPI, Depends, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.ext.asyncio import AsyncSession
-from typing import List
 
 from core.config import settings
 from core.security import get_current_user
-from models.schemas import ChatRequest, ChatResponse, StartChatRequest, StartChatResponse, ChatMessageRequest, HistorySummary
+from models.schemas import ChatRequest, ChatResponse
 from services import chat_orchestrator
 from db.database import get_db_session
 
@@ -29,6 +28,14 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# 토큰 호출
+@app.post("/api/auth/login")
+def receive_token(credentials: HTTPAuthorizationCredentials = Depends(bearer)):
+    token = credentials.credentials
+    print("Received JWT from Spring:", token)
+    # 검증 로직 추가 가능
+    return {"status": "ok", "token": token}
 
 
 @app.on_event("startup")

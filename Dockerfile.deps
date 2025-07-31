@@ -13,3 +13,7 @@ COPY requirements.txt .
 # pip install (캐시 활용)
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install --no-cache-dir -r requirements.txt
+
+# **** 추가된 확인 라인 (빌드 로그에서 설치 여부 확인용) ****
+RUN pip show python-jose
+# **************************

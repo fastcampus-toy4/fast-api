@@ -90,7 +90,7 @@ async def lifespan(app: FastAPI):
 
     # --- 1. AI 모델(LLM) 초기화 ---
     # app.state에 llm 객체를 만들어 다른 파일에서 공유할 수 있도록 합니다.
-    app.state.llm = ChatOpenAI(model="gpt-4o", temperature=0, api_key=settings.***REMOVED***)
+    app.state.llm = ChatOpenAI(model="gpt-4o", temperature=0, api_key=settings.OPENAI_API_KEY)
     print("✅ AI 모델(LLM)이 성공적으로 초기화되었습니다.")
 
     # --- 2. 사전 데이터 로드 ---

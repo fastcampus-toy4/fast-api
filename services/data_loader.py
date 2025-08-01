@@ -20,7 +20,7 @@ def load_all_data():
 
     print("사전 데이터 로드를 시작합니다...")
     
-    embedding_function = OpenAIEmbeddings(model="text-embedding-3-small", api_key=settings.***REMOVED***)
+    embedding_function = OpenAIEmbeddings(model="text-embedding-3-small", api_key=settings.OPENAI_API_KEY)
     
     try:
         print(f"-> ChromaDB 서버 ({settings.CHROMA_HOST}:{settings.CHROMA_PORT})에 연결합니다...")

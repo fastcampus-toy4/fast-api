@@ -73,7 +73,7 @@
 
 
 #     # --- [2단계] LLM 기반 RAG 필터링 (자가 교정 포함) ---
-#     llm = ChatOpenAI(model="gpt-4o", temperature=0, api_key=settings.***REMOVED***)
+#     llm = ChatOpenAI(model="gpt-4o", temperature=0, api_key=settings.OPENAI_API_KEY)
     
 #     # 정보 검색 (ChromaDB 또는 웹)
 #     retrieved_knowledge = await _retrieve_health_knowledge(disease, dietary_restrictions)
@@ -168,7 +168,7 @@
 #         JSON:
 #         """
 #     )
-#     llm = ChatOpenAI(model="gpt-4o", temperature=0, api_key=settings.***REMOVED***)
+#     llm = ChatOpenAI(model="gpt-4o", temperature=0, api_key=settings.OPENAI_API_KEY)
 #     chain = prompt | llm | JsonOutputParser()
 #     try:
 #         return await chain.ainvoke({"disease": disease, "context": text})
@@ -206,7 +206,7 @@
 #             search_tool = GoogleSearchAPIWrapper()
 #             web_results = await asyncio.to_thread(search_tool.run, f"{query} 최신 가이드라인")
 #             if web_results and "No good Google Search Result" not in web_results:
-#                 llm = ChatOpenAI(model="gpt-4o", temperature=0, api_key=settings.***REMOVED***)
+#                 llm = ChatOpenAI(model="gpt-4o", temperature=0, api_key=settings.OPENAI_API_KEY)
 #                 summary = await llm.ainvoke(f"다음 웹 검색 결과를 바탕으로 '{query}'에 대한 핵심만 요약해줘:\n\n{web_results}")
 #                 knowledge += "\n\n[웹 검색 정보]\n" + summary.content
 #         except Exception as e:
@@ -360,7 +360,7 @@ async def _hybrid_deep_filter(db: AsyncSession, standard_dishes: Set[str], disea
         print(f"[동적 수치 필터링 오류] {e}")
 
     # [2-2단계] LLM 기반 RAG 필터링 (자가 교정 포함)
-    llm = ChatOpenAI(model="gpt-4o", temperature=0, api_key=settings.***REMOVED***)
+    llm = ChatOpenAI(model="gpt-4o", temperature=0, api_key=settings.OPENAI_API_KEY)
     retrieved_knowledge = await _retrieve_health_knowledge(disease, dietary_restrictions)
     initial_judgment = await _get_llm_judgment(llm, retrieved_knowledge, standard_dishes, is_final=False)
     suitable_after_initial = {dish for dish, details in initial_judgment.items() if isinstance(details, dict) and details.get("is_suitable")}
@@ -432,7 +432,7 @@ async def _extract_criteria_from_text(text: str, disease: str) -> dict:
         JSON:
         """
     )
-    llm = ChatOpenAI(model="gpt-4o", temperature=0, api_key=settings.***REMOVED***)
+    llm = ChatOpenAI(model="gpt-4o", temperature=0, api_key=settings.OPENAI_API_KEY)
     chain = prompt | llm | JsonOutputParser()
     try:
         return await chain.ainvoke({"disease": disease, "context": text})
@@ -471,7 +471,7 @@ async def _retrieve_health_knowledge(disease: str, dietary_restrictions: str) ->
             search_tool = GoogleSearchAPIWrapper(api_key=settings.GOOGLE_API_KEY, cse_id=settings.GOOGLE_CSE_ID)
             web_results = await asyncio.to_thread(search_tool.run, f"{query} 최신 가이드라인")
             if web_results and "No good Google Search Result" not in web_results:
-                llm = ChatOpenAI(model="gpt-4o", temperature=0, api_key=settings.***REMOVED***)
+                llm = ChatOpenAI(model="gpt-4o", temperature=0, api_key=settings.OPENAI_API_KEY)
                 summary = await llm.ainvoke(f"다음 웹 검색 결과를 바탕으로 '{query}'에 대한 핵심만 요약해줘:\n\n{web_results}")
                 knowledge += "\n\n[웹 검색 정보]\n" + summary.content
         except Exception as e:

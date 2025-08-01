@@ -28,9 +28,9 @@ class Settings:
     )
 
     # OpenAI API Key
-    ***REMOVED***: str = os.getenv("***REMOVED***")
-    if not ***REMOVED***:
-        raise ValueError("***REMOVED*** 환경 변수가 설정되지 않았습니다.")
+    OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY")
+    if not OPENAI_API_KEY:
+        raise ValueError("OPENAI_API_KEY 환경 변수가 설정되지 않았습니다.")
 
     # --- ChromaDB Server ---
     CHROMA_HOST: str = os.getenv("CHROMA_HOST")

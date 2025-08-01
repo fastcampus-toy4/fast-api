@@ -139,7 +139,7 @@
 
 # async def _update_user_info(user_info: UserRequestInfo, message: str):
 #     """LLM을 사용해 사용자 메시지에서 정보를 추출하여 상태를 업데이트"""
-#     llm = ChatOpenAI(model="gpt-4o", temperature=0, api_key=settings.***REMOVED***)
+#     llm = ChatOpenAI(model="gpt-4o", temperature=0, api_key=settings.OPENAI_API_KEY)
 #     structured_llm = llm.with_structured_output(UserRequestInfo)
     
 #     prompt = f"""

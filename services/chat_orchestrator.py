@@ -250,11 +250,12 @@ async def process_chat_message(state: dict, user_input: str, db: AsyncSession) -
         return ChatResponse(response=next_question, session_id=session_id, state=state)
 
     # 3. 모든 정보 수집 완료 -> 추천 프로세스 시작
+    # 3. 모든 정보 수집 완료 -> 추천 프로세스 시작
     try:
         print(f"[{session_id}] 모든 정보 수집 완료. 추천 프로세스 시작.")
         print(f"    - 최종 수집 정보: {user_info.model_dump_json(indent=2)}")
 
-        # [수정] 1. 지역명을 '구' 단위로 변환
+        # 1. 지역명 변환
         print(f"    - 원본 위치 입력: '{user_info.location}'")
         location_gu = await nlu_service.extract_gu_from_location(user_info.location)
         if location_gu == "알 수 없음":
@@ -269,16 +270,18 @@ async def process_chat_message(state: dict, user_input: str, db: AsyncSession) -
         print(f"[DEBUG] 1단계 통과 (위치/편의시설). 후보 음식점: {len(restaurants_step1)}개")
 
         menus_by_restaurant = await db_service.get_normalized_menus_for_restaurants(db, restaurants_step1)
-        # ▼▼▼▼▼ [수정] 메뉴 정보가 있는 음식점만 후보로 다시 정의 ▼▼▼▼▼
+        
+        # ▼▼▼▼▼ [수정] 메뉴 정보가 있는 음식점만 후보로 다시 정의합니다 ▼▼▼▼▼
         restaurants_step2 = [r for r in restaurants_step1 if f"{r['name']} {r.get('branch_name', '')}".strip() in menus_by_restaurant]
         if not restaurants_step2:
             print("[DEBUG] 종료: 2단계에서 메뉴 정보가 있는 음식점을 찾지 못했습니다.")
             return ChatResponse(response="조건에 맞는 음식점은 찾았지만, 메뉴 정보가 없어 추천할 수 없네요.", session_id=session_id, is_final=True, state=state)
         print(f"[DEBUG] 2단계 통과 (메뉴 보유). 후보 음식점: {len(restaurants_step2)}개")
         
+        # 이제 menus_by_restaurant에서 전체 메뉴 집합을 만듭니다.
         all_menus = {menu for menus in menus_by_restaurant.values() for menu in menus}
 
-        # [수정] 3. 질병명 정규화
+        # 3. 질병명 정규화
         print(f"    - 원본 질병 입력: '{user_info.disease}'")
         normalized_disease = await nlu_service.normalize_disease_name(user_info.disease)
         print(f"    - 정규화된 질병명: '{normalized_disease}'")
@@ -289,7 +292,7 @@ async def process_chat_message(state: dict, user_input: str, db: AsyncSession) -
             return ChatResponse(response="고객님의 건강 조건에 맞는 메뉴를 찾지 못했습니다.", session_id=session_id, is_final=True, state=state)
         print(f"[DEBUG] 3단계 통과 (건강 메뉴). 적합 메뉴: {len(suitable_menus)}개")
 
-        # ▼▼▼▼▼ [수정] restaurants_step2를 기준으로 필터링 ▼▼▼▼▼
+        # ▼▼▼▼▼ [수정] restaurants_step1이 아닌, 메뉴가 있는 restaurants_step2를 기준으로 필터링합니다 ▼▼▼▼▼
         restaurants_step4 = [r for r in restaurants_step2 if any(menu in suitable_menus for menu in menus_by_restaurant.get(f"{r['name']} {r.get('branch_name', '')}".strip(), set()))]
         if not restaurants_step4:
             print("[DEBUG] 종료: 4단계(메뉴 판매점 필터링)에서 적합한 음식점을 찾지 못했습니다.")

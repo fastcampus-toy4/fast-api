@@ -51,6 +51,12 @@ class UserRequestInfo(BaseModel):
             self.disease,
             self.other_requests is not None # 'None'이 아니어야만 통과
         ])
+        
+# ▼▼▼▼▼ 누락되었던 SeoulGuInfo 모델을 여기에 추가합니다 ▼▼▼▼▼
+class SeoulGuInfo(BaseModel):
+    gu_name: str = Field(description="서울의 25개 행정구 중 가장 관련성 높은 '구'의 이름")
+# ▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲
+
 class CrawledInfo(BaseModel):
     """크롤링된 텍스트에서 추출한 정보 모델"""
     address: Optional[str] = Field(None, description="추출된 주소")

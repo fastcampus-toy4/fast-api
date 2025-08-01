@@ -11,6 +11,10 @@ from core.lifespans import lifespan # 새로운 startup 방식
 from models.schemas import ChatRequest, ChatResponse, StartChatRequest, StartChatResponse, HistorySummary
 from services import chat_orchestrator
 from db.dependencies import get_db # 새로운 DB 세션 의존성
+# 토큰
+
+from fastapi import FastAPI, Depends, HTTPException
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
 # --- FastAPI 앱 초기화 ---
 app = FastAPI(
@@ -33,6 +37,15 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+# 토큰
+bearer = HTTPBearer()
+
+@app.post("/api/auth/login")
+def receive_token(credentials: HTTPAuthorizationCredentials = Depends(bearer)):
+    token = credentials.credentials
+    print("Received JWT from Spring:", token)
+    # 검증 로직 추가 가능
+    return {"status": "ok", "token": token}
 
 # --- API 엔드포인트(경로) 정의 ---
 
